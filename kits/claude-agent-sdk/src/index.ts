@@ -204,6 +204,14 @@ async function main(): Promise<void> {
   // One `query` call is the whole conversation: the SDK keeps full context
   // across turns natively, so there is no thread_id to carry. We print as
   // messages stream and, on each turn's `result`, prompt for the next turn.
+  //
+  // NOTE: unlike the discrete-invoke kits (openai/mastra/vercel/langchain),
+  // this kit does NOT wrap turns in the shared `withRetry` + per-attempt
+  // timeout. A single streaming `query` session cannot be re-invoked without
+  // discarding the whole conversation, and racing a timeout against the stream
+  // would truncate legitimately long turns. If a stall guard is needed here,
+  // drive the iterator manually and race each `.next()` against a timeout,
+  // calling `session.return?.()` to tear the session down on timeout.
   for await (const msg of session) {
     if (msg.type === 'assistant') {
       printAssistant(msg);

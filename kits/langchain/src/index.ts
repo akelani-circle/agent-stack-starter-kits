@@ -18,7 +18,7 @@
 
 import { HumanMessage } from '@langchain/core/messages';
 import { Command } from '@langchain/langgraph';
-import { createChatUi, type ChatUi } from '@agent-stack-ecosystem-kits/agent-cli';
+import { createChatUi, withRetry, type ChatUi } from '@agent-stack-ecosystem-kits/agent-cli';
 import {
   ensureSession,
   formatUsdcBalance,
@@ -80,7 +80,7 @@ interface AgentResult {
 type Decision = { type: 'approve' } | { type: 'reject' };
 
 type Agent = ReturnType<typeof buildAgent>;
-type RunConfig = { configurable: { thread_id: string } };
+type RunConfig = { configurable: { thread_id: string }; signal?: AbortSignal };
 
 const EMPTY_RESPONSE_RETRIES = 2;
 
@@ -140,7 +140,10 @@ async function runTurn(
 ): Promise<AgentResult> {
   let attempt = 0;
   while (true) {
-    let result = (await agent.invoke(input, runConfig)) as AgentResult;
+    let result = (await withRetry(
+      (signal) => agent.invoke(input, { ...runConfig, signal }),
+      { label: 'agent', log },
+    )) as AgentResult;
 
     while (result.__interrupt__ && result.__interrupt__.length > 0) {
       const requests = result.__interrupt__[0]?.value?.actionRequests ?? [];
@@ -150,9 +153,10 @@ async function runTurn(
         decisions.push(await reviewAction(req, ask));
       }
       log('resuming agent ...');
-      result = (await agent.invoke(
-        new Command({ resume: { decisions } }),
-        runConfig,
+      result = (await withRetry(
+        (signal) =>
+          agent.invoke(new Command({ resume: { decisions } }), { ...runConfig, signal }),
+        { label: 'agent', log },
       )) as AgentResult;
     }
 

@@ -32,6 +32,12 @@ import type {
   ServiceAccepts,
   ServiceInspection,
 } from './types';
+import {
+  buildResponseVocab,
+  findFieldViolations,
+  preSpendErrorMessage,
+  requestSchemaShape,
+} from './validate';
 
 const TX_HASH_REGEX = /0x[a-fA-F0-9]{64}/;
 /**
@@ -96,7 +102,12 @@ interface RawInspection {
   url?: string;
   status?: string;
   description?: string;
-  provider?: { name?: string; description?: string };
+  provider?: {
+    name?: string;
+    description?: string;
+    openApiUrl?: string;
+    docsUrl?: string;
+  };
   price?: { amount?: string; formatted?: string };
   input?: unknown;
   method?: string;
@@ -166,6 +177,8 @@ export async function inspectService(input: InspectServiceInput): Promise<Servic
     schema: data.input,
     health: data.status,
     method: data.method ? data.method.toUpperCase() : undefined,
+    openApiUrl: provider.openApiUrl,
+    docsUrl: provider.docsUrl,
   };
 }
 
@@ -479,8 +492,47 @@ interface RawPayEnvelope {
  * `{ response, payment: { amount, receipt } }`, and success is the CLI exit code
  * (a real failure throws), never whether a hash was found.
  */
+/**
+ * Reject a payload the seller is guaranteed to refuse, BEFORE any USDC is spent.
+ *
+ * x402 submits payment before the server validates the body, so a bad field name
+ * or an out-of-enum value costs money for a certain 422. This re-reads the
+ * service's published constraints (its inline input schema for enums, and its
+ * OpenAPI response schema for the field names it can return) and throws if the
+ * payload provably violates them — a free failure the caller can fix and retry.
+ *
+ * It FAILS OPEN: any error reading or parsing those constraints is swallowed and
+ * the payment proceeds, so a flaky spec fetch never blocks an otherwise valid
+ * call. Only a positively-proven-invalid value stops the payment.
+ */
+async function assertPayloadValid(input: PayServiceInput, method: string): Promise<void> {
+  let inspection: ServiceInspection;
+  try {
+    inspection = await inspectService({ url: input.url });
+  } catch {
+    return; // Cannot read constraints; do not block the payment.
+  }
+  const shape = requestSchemaShape(inspection.schema);
+  if (!shape) return;
+  let vocab: Set<string> | null = null;
+  try {
+    vocab = await buildResponseVocab(inspection.openApiUrl, input.url, method);
+  } catch {
+    vocab = null;
+  }
+  const problems = findFieldViolations(input.data, { ...shape, vocab });
+  if (problems.length) {
+    throw new Error(preSpendErrorMessage(input.url, problems));
+  }
+}
+
 export async function payService(input: PayServiceInput): Promise<PaymentResult> {
   const method = (input.method ?? 'GET').toUpperCase();
+  // Guard the payload against the seller's published constraints before spending;
+  // x402 charges before the server validates, so a provably-bad field must be
+  // caught here, not after the USDC is gone.
+  await assertPayloadValid(input, method);
+
   const sendsBody = BODY_METHODS.has(method);
   const url = sendsBody ? input.url : appendQuery(input.url, input.data);
   const args = [

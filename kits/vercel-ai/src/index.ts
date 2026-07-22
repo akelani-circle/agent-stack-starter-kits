@@ -19,7 +19,12 @@
 import 'dotenv/config';
 import type { CoreMessage } from 'ai';
 
-import { createChatUi, type ChatUi } from '@agent-stack-ecosystem-kits/agent-cli';
+import {
+  createChatUi,
+  withRetry,
+  isRetryableError,
+  type ChatUi,
+} from '@agent-stack-ecosystem-kits/agent-cli';
 import {
   ensureSession,
   formatUsdcBalance,
@@ -28,7 +33,7 @@ import {
 import { loadConfig, type KitConfig } from './config';
 import { runTurn } from './agent';
 import { buildTools, type CircleTools } from './tools';
-import { withRetry } from './retry';
+import { isQuotaExhausted } from './retry';
 import { SETUP_SKILL_URL } from './skill';
 import { bold, dim, kitLine, red, yellow } from './theme';
 
@@ -70,15 +75,24 @@ async function runAgentTurn(
   messages: CoreMessage[],
   tools: CircleTools,
 ): Promise<{ text: string; responseMessages: CoreMessage[] }> {
+  // Fast-fail quota-exhausted 429s so the fallback fires immediately; retry
+  // every other transient error (and stalls) per the shared default.
+  const shouldRetry = (error: unknown): boolean =>
+    isRetryableError(error) && !isQuotaExhausted(error);
   try {
-    return await withRetry(() => runTurn(config, messages, tools), config.provider);
+    return await withRetry((signal) => runTurn(config, messages, tools, signal), {
+      label: config.provider,
+      log,
+      shouldRetry,
+    });
   } catch (primaryErr) {
     if (!config.fallback) throw primaryErr;
     log(yellow(`${config.provider} failed — falling back to ${config.fallback.provider} (${config.fallback.model}) …`));
-    return await withRetry(
-      () => runTurn(config.fallback!, messages, tools),
-      config.fallback.provider,
-    );
+    return await withRetry((signal) => runTurn(config.fallback!, messages, tools, signal), {
+      label: config.fallback.provider,
+      log,
+      shouldRetry,
+    });
   }
 }
 

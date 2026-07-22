@@ -152,6 +152,13 @@ async function main(): Promise<void> {
   while (true) {
     if (input) {
       chat.setStatus('working…');
+      // NOTE: unlike the discrete-invoke kits (openai/mastra/vercel/langchain),
+      // this kit does NOT wrap turns in the shared `withRetry` + per-attempt
+      // timeout. `runAsync` yields a single streaming turn over a persistent ADK
+      // session; racing a timeout against the stream would truncate a
+      // legitimately long turn. If a stall guard is needed, drive the iterator
+      // manually and race each `.next()` against a timeout, calling the
+      // iterator's `return?.()` to clean up on timeout.
       for await (const event of runner.runAsync({
         userId: USER_ID,
         sessionId: session.id,

@@ -57,6 +57,7 @@ export async function runTurn(
   config: ProviderConfig,
   messages: CoreMessage[],
   tools: CircleTools,
+  signal?: AbortSignal,
 ): Promise<{ text: string; responseMessages: CoreMessage[] }> {
   const model = pickModel(config);
 
@@ -67,6 +68,7 @@ export async function runTurn(
     tools,
     messages,
     maxSteps: 30,
+    abortSignal: signal,
     onStepFinish: ({ text, toolCalls, finishReason }) => {
       stepCount++;
       // Print any prose the model emitted in this step. Tool calls are logged

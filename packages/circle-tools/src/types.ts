@@ -48,6 +48,14 @@ export interface ServiceInspection extends Service {
    * request body. Sending the input the wrong way makes the server see no input.
    */
   method?: string;
+  /**
+   * URL of the seller's OpenAPI document, when advertised. Its response schema
+   * names the fields the service can return, which the pre-payment guard uses to
+   * validate enum-less field selectors (e.g. `return_fields`) before spending.
+   */
+  openApiUrl?: string;
+  /** URL of the seller's human docs, when advertised. */
+  docsUrl?: string;
 }
 
 export interface PaymentResult {

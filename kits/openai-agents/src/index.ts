@@ -20,7 +20,7 @@ import 'dotenv/config';
 import { createInterface } from 'node:readline/promises';
 import { run, user } from '@openai/agents';
 import type { Agent, RunResult } from '@openai/agents';
-import { createChatUi, type ChatUi } from '@agent-stack-ecosystem-kits/agent-cli';
+import { createChatUi, withRetry, type ChatUi } from '@agent-stack-ecosystem-kits/agent-cli';
 import {
   ensureSession,
   formatUsdcBalance,
@@ -28,7 +28,6 @@ import {
 } from '@agent-stack-ecosystem-kits/circle-tools';
 import { buildAgent } from './agent';
 import { loadConfig } from './config';
-import { withRetry } from './retry';
 import { bold, kitLine } from './theme';
 
 // The chat UI pins the input to the bottom while logs scroll above it. It is
@@ -90,7 +89,7 @@ async function main(): Promise<void> {
   log('running agent...');
 
   chat.setStatus('working…');
-  let result = await withRetry(() => run(agent, prompt), 'agent');
+  let result = await withRetry((signal) => run(agent, prompt, { signal }), { label: 'agent', log });
   result = await resolveInterruptions(result, agent);
   chat.setStatus(null);
   await refreshBalance();
@@ -103,7 +102,10 @@ async function main(): Promise<void> {
     // A blank line is a stray Enter, not an intent to quit: re-prompt.
     if (!input) continue;
     chat.setStatus('working…');
-    result = await withRetry(() => run(agent, [...result.history, user(input)]), 'agent');
+    result = await withRetry((signal) => run(agent, [...result.history, user(input)], { signal }), {
+      label: 'agent',
+      log,
+    });
     result = await resolveInterruptions(result, agent);
     chat.setStatus(null);
     await refreshBalance();
@@ -135,7 +137,7 @@ async function resolveInterruptions(
         result.state.reject(interruption, { message: 'User declined.' });
       }
     }
-    result = await withRetry(() => run(agent, result.state), 'agent');
+    result = await withRetry((signal) => run(agent, result.state, { signal }), { label: 'agent', log });
   }
   return result;
 }

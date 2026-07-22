@@ -37,13 +37,29 @@ import { Box, render, Static, Text, type Instance } from 'ink';
 import TextInput from 'ink-text-input';
 import { useEffect, useState, useSyncExternalStore, type ReactElement } from 'react';
 
+// Shared retry + per-attempt hang timeout, re-exported so kits import it from
+// the same package as the chat UI (see ./retry).
+export {
+  withRetry,
+  isRetryableError,
+  TurnTimeoutError,
+  DEFAULT_MAX_RETRIES,
+  DEFAULT_TIMEOUT_MS,
+  type WithRetryOptions,
+} from './retry';
+
 /** Imperative handle the kits drive; identical shape in TTY and non-TTY modes. */
 export interface ChatUi {
   /** Append one line to the scrollback log (keeps any embedded ANSI color). */
   log(line: string): void;
   /** Pin `question` at the bottom and resolve with the line the user submits. */
   ask(question: string): Promise<string>;
-  /** Show (or clear, with null) a transient status line above the input. */
+  /**
+   * Turn the animated "working" indicator on (any non-null text) above the
+   * input. Passing null is intentionally a no-op: the indicator is not cleared
+   * here — it stays visible until control is handed back to the user via the
+   * next `ask()`, so it never blinks out during the gap before an answer prints.
+   */
   setStatus(text: string | null): void;
   /** Show (or clear, with null) a persistent balance line pinned above the input. */
   setBalance(text: string | null): void;
@@ -64,7 +80,8 @@ interface LogItem {
 interface Snapshot {
   logs: LogItem[];
   question: string | null;
-  status: string | null;
+  /** Whether the animated "working" indicator is shown (agent busy, input off). */
+  working: boolean;
   balance: string | null;
 }
 
@@ -91,7 +108,7 @@ function toLabel(question: string): string {
 
 function createInkUi(options: ChatUiOptions): ChatUi {
   const initialLogs: LogItem[] = options.title ? [{ id: 0, text: options.title }] : [];
-  let snapshot: Snapshot = { logs: initialLogs, question: null, status: null, balance: null };
+  let snapshot: Snapshot = { logs: initialLogs, question: null, working: false, balance: null };
   let nextId = 1;
   const listeners = new Set<() => void>();
 
@@ -116,7 +133,9 @@ function createInkUi(options: ChatUiOptions): ChatUi {
   const ask = (question: string): Promise<string> =>
     new Promise<string>((resolve) => {
       resolveAsk = resolve;
-      snapshot = { ...snapshot, question };
+      // Re-enabling the input is the one moment control returns to the user, so
+      // this is where the "working" indicator is cleared — never before.
+      snapshot = { ...snapshot, question, working: false };
       emit();
     });
   const submit = (value: string): void => {
@@ -128,7 +147,11 @@ function createInkUi(options: ChatUiOptions): ChatUi {
   };
 
   const setStatus = (text: string | null): void => {
-    snapshot = { ...snapshot, status: text };
+    // Non-null switches the indicator on; null is a deliberate no-op (see the
+    // ChatUi.setStatus docs) so it stays visible until the next `ask()`.
+    if (text === null) return;
+    if (snapshot.working) return;
+    snapshot = { ...snapshot, working: true };
     emit();
   };
 
@@ -183,24 +206,38 @@ function App({ store, onSubmit }: { store: Store; onSubmit: (value: string) => v
     if (snap.question !== null) setValue('');
   }, [snap.question]);
 
+  // Animate the "working" indicator between one, two and three dots so it reads
+  // as live progress rather than a frozen line. The timer only runs while the
+  // agent is busy; it resets to a single dot each time work starts.
+  const [dotFrame, setDotFrame] = useState(0);
+  useEffect(() => {
+    if (!snap.working) return;
+    setDotFrame(0);
+    const timer = setInterval(() => setDotFrame((f) => (f + 1) % 3), 350);
+    return () => clearInterval(timer);
+  }, [snap.working]);
+
   const handleSubmit = (submitted: string): void => {
     setValue('');
     onSubmit(submitted);
   };
 
+  const pending = snap.question !== null;
+  const label = pending ? toLabel(snap.question as string) : '';
+
+  // The input box is ALWAYS mounted, even between prompts. Mounting/unmounting
+  // it per turn made `ink-text-input`'s `useInput` toggle the terminal's raw
+  // mode on every turn, which under bun corrupts the frame and eventually
+  // throws `setRawMode failed with errno: 5`. Keeping it mounted sets raw mode
+  // once for the session. Submits while no question is pending are dropped by
+  // the controller (there is no `resolveAsk` to satisfy), so an idle Enter is a
+  // harmless no-op rather than a race.
   return (
     <Box flexDirection="column">
       <Static items={snap.logs}>{(item) => <Text key={item.id}>{item.text}</Text>}</Static>
-      {snap.status !== null ? <Text dimColor>{snap.status}</Text> : null}
-      {snap.question !== null ? (
-        <Box flexDirection="column" marginTop={1}>
-          {toLabel(snap.question) ? <Text>{toLabel(snap.question)}</Text> : null}
-          <Box borderStyle="round" paddingX={1}>
-            <Text>{'> '}</Text>
-            <TextInput value={value} onChange={setValue} onSubmit={handleSubmit} />
-          </Box>
-        </Box>
-      ) : null}
+      {snap.working ? <Text dimColor>{`working${'.'.repeat(dotFrame + 1)}`}</Text> : null}
+      {/* Balance sits ABOVE the input box: rendering it after the input painted
+          the readout beneath the prompt, colliding with the caret line. */}
       {snap.balance !== null ? (
         <Text color="green">
           {'◈ '}
@@ -208,6 +245,13 @@ function App({ store, onSubmit }: { store: Store; onSubmit: (value: string) => v
           {` ${snap.balance}`}
         </Text>
       ) : null}
+      <Box flexDirection="column" marginTop={1}>
+        {label ? <Text>{label}</Text> : null}
+        <Box borderStyle="round" paddingX={1} borderColor={pending ? undefined : 'gray'}>
+          <Text dimColor={!pending}>{'> '}</Text>
+          <TextInput value={value} onChange={setValue} onSubmit={handleSubmit} />
+        </Box>
+      </Box>
     </Box>
   );
 }

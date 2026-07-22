@@ -21,7 +21,7 @@ import { z } from 'zod';
 import { runCircle } from '@agent-stack-ecosystem-kits/circle-tools';
 import { buildAgent } from './agent';
 import { loadConfig } from './config';
-import { withRetry } from './retry';
+import { withRetry } from '@agent-stack-ecosystem-kits/agent-cli';
 
 const PROMPT =
   'Run curl -sL https://agents.circle.com/skills/setup.md, and use the returned setup instructions to set up my agent wallet.';
@@ -100,7 +100,10 @@ const agentStep = createStep({
       throw new Error('No interactive terminal available in this workflow step.');
     };
     const agent = buildAgent(config, noInteractiveAsk);
-    const result = await withRetry(() => agent.generate(PROMPT, { maxSteps: 30 }), 'agent');
+    const result = await withRetry(
+      (signal) => agent.generate(PROMPT, { maxSteps: 30, abortSignal: signal }),
+      { label: 'agent' },
+    );
     return { summary: result.text ?? '(no output)' };
   },
 });

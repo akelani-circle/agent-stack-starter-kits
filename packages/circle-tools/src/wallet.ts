@@ -194,21 +194,41 @@ export interface UsdcBalanceSummary {
   chain: Chain;
 }
 
+/** Read a wallet's USDC amount, treating any failure as "0" so one bad RPC
+ * read never sinks the whole summary. */
+async function usdcAmountOf(address: string, chain: Chain): Promise<string> {
+  try {
+    const balance = await getBalance({ address, chain });
+    return balance.tokens.find((t) => t.symbol === 'USDC')?.amount ?? '0';
+  } catch {
+    return '0';
+  }
+}
+
 /**
- * Fetch a compact USDC balance summary for the agent's first wallet, for UI
- * display. Returns null when no wallet exists yet (e.g. before setup) so a
- * caller can simply hide the readout. Best-effort: a caller should treat a
- * throw as "unknown" and never break the session over a balance read.
+ * Fetch a compact USDC balance summary for the agent's *funded* wallet, for UI
+ * display. Scans every wallet and surfaces the one holding the most USDC, so
+ * the readout reflects the wallet actually worth using rather than always the
+ * first-listed wallet (which is frequently empty). Falls back to the first
+ * wallet when none hold USDC. Returns null when no wallet exists yet (e.g.
+ * before setup) so a caller can simply hide the readout. Best-effort: a caller
+ * should treat a throw as "unknown" and never break the session over a balance
+ * read.
  */
 export async function walletUsdcBalance(
   chain: Chain = DEFAULT_CHAIN,
 ): Promise<UsdcBalanceSummary | null> {
   const wallets = await listWallets();
-  const first = wallets[0];
-  if (!first) return null;
-  const balance = await getBalance({ address: first.address, chain });
-  const usdc = balance.tokens.find((t) => t.symbol === 'USDC')?.amount ?? '0';
-  return { address: first.address, usdc, chain };
+  if (wallets.length === 0) return null;
+  const balances = await Promise.all(
+    wallets.map(async (w) => ({ address: w.address, usdc: await usdcAmountOf(w.address, chain) })),
+  );
+  // Highest USDC wins; the first wallet is the fallback when every wallet is
+  // empty (reduce seeds with balances[0], so a no-funds scan returns it).
+  const chosen = balances.reduce((best, cur) =>
+    Number(cur.usdc) > Number(best.usdc) ? cur : best,
+  );
+  return { address: chosen.address, usdc: chosen.usdc, chain };
 }
 
 /** Abbreviate an EVM address for display, e.g. `0x6be2…fbb5`. */

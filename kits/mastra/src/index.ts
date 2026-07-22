@@ -18,7 +18,7 @@
 
 import 'dotenv/config';
 import { createInterface } from 'node:readline/promises';
-import { createChatUi, type ChatUi } from '@agent-stack-ecosystem-kits/agent-cli';
+import { createChatUi, withRetry, type ChatUi } from '@agent-stack-ecosystem-kits/agent-cli';
 import {
   ensureSession,
   formatUsdcBalance,
@@ -27,7 +27,6 @@ import {
 import { onboardingWorkflow } from './workflow';
 import { buildAgent } from './agent';
 import { loadConfig } from './config';
-import { withRetry } from './retry';
 import { bold, kitLine } from './theme';
 
 const INITIAL_PROMPT =
@@ -130,7 +129,10 @@ async function main(): Promise<void> {
     if (!input) continue;
     messages.push({ role: 'user', content: input });
     chat.setStatus('working…');
-    const response = await withRetry(() => agent.generate(messages, { maxSteps: 30 }), 'agent');
+    const response = await withRetry(
+      (signal) => agent.generate(messages, { maxSteps: 30, abortSignal: signal }),
+      { label: 'agent', log },
+    );
     chat.setStatus(null);
     await refreshBalance();
     const text = response.text ?? '(no output)';

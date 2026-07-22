@@ -36,7 +36,7 @@ export interface KitConfig extends ProviderConfig {
 }
 
 const DEFAULT_ANTHROPIC_MODEL = 'claude-sonnet-4-6';
-const DEFAULT_OPENAI_MODEL = 'gpt-4.1';
+const DEFAULT_OPENAI_MODEL = 'gpt-5.4';
 
 /**
  * Load kit configuration from environment variables.
@@ -59,7 +59,7 @@ export function loadConfig(): KitConfig {
     return {
       chain,
       provider: 'anthropic',
-      model: env['LLM_MODEL'] ?? DEFAULT_ANTHROPIC_MODEL,
+      model: env['LLM_MODEL']?.trim() || DEFAULT_ANTHROPIC_MODEL,
       fallback: openaiKey
         ? { provider: 'openai', model: DEFAULT_OPENAI_MODEL }
         : undefined,
@@ -70,7 +70,7 @@ export function loadConfig(): KitConfig {
     return {
       chain,
       provider: 'openai',
-      model: env['LLM_MODEL'] ?? DEFAULT_OPENAI_MODEL,
+      model: env['LLM_MODEL']?.trim() || DEFAULT_OPENAI_MODEL,
     };
   }
 

@@ -22,6 +22,7 @@ export const MAX_RETRIES = 4;
 
 interface MaybeStatusError {
   status?: number;
+  headers?: Record<string, string>;
   cause?: unknown;
 }
 
@@ -33,6 +34,28 @@ function statusOf(error: unknown): number | undefined {
   const e = error as MaybeStatusError;
   if (typeof e?.status === 'number') return e.status;
   if (e?.cause !== undefined) return statusOf(e.cause);
+  return undefined;
+}
+
+/**
+ * Parse how long the provider wants us to wait from a 429 response.
+ * Checks response headers first (most accurate), then falls back to
+ * the "Please try again in X.Xs" text in the error message.
+ */
+function retryAfterMs(error: unknown): number | undefined {
+  const e = error as MaybeStatusError;
+  const headers = e?.headers;
+  if (headers) {
+    const raw = headers['retry-after'] ?? headers['x-ratelimit-reset-tokens'];
+    if (raw !== undefined) {
+      const secs = parseFloat(raw);
+      if (!isNaN(secs)) return Math.ceil(secs) * 1_000;
+    }
+  }
+  const msg = error instanceof Error ? error.message : '';
+  const m = /try again in ([\d.]+)s/i.exec(msg);
+  if (m?.[1]) return Math.ceil(parseFloat(m[1])) * 1_000;
+  if (e?.cause !== undefined) return retryAfterMs(e.cause);
   return undefined;
 }
 
@@ -52,7 +75,9 @@ function isRetryable(error: unknown): boolean {
 /**
  * Run `fn`, retrying up to MAX_RETRIES times on transient provider errors.
  * Logs each retry in yellow so the user knows the app is not frozen.
- * Uses exponential backoff (1 s, 2 s, 4 s, 8 s).
+ * Delay: the provider's retry-after hint when available (parsed from headers
+ * or error message), otherwise exponential backoff (1 s, 2 s, 4 s, 8 s).
+ * ±25% jitter is applied in both cases to avoid synchronized retries.
  */
 export async function withRetry<T>(fn: () => Promise<T>, label: string): Promise<T> {
   let attempt = 0;
@@ -70,7 +95,9 @@ export async function withRetry<T>(fn: () => Promise<T>, label: string): Promise
       const tail = last ? 'giving up' : `retrying (${attempt}/${MAX_RETRIES}) …`;
       console.log(kitLine(yellow(`${label}: model ${reason} — ${tail}`)));
       if (last) throw error;
-      await new Promise((r) => setTimeout(r, 1_000 * 2 ** (attempt - 1)));
+      const base = retryAfterMs(error) ?? 1_000 * 2 ** (attempt - 1);
+      const jitter = base * 0.25 * (Math.random() * 2 - 1);
+      await new Promise((r) => setTimeout(r, Math.max(0, Math.round(base + jitter))));
     }
   }
 }

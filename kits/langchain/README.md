@@ -36,7 +36,7 @@ bun run --cwd kits/langchain demo
 | Variable | Required | Notes |
 | --- | --- | --- |
 | `ANTHROPIC_API_KEY` *or* `OPENAI_API_KEY` | one of | Provider auto-selected from whichever key is set. Anthropic wins if both are set. |
-| `LLM_MODEL` | no | Overrides the default model (`claude-sonnet-4-6` / `gpt-4o-mini`). |
+| `LLM_MODEL` | no | Overrides the default model (`claude-sonnet-4-6` / `gpt-5.4`). |
 | `NO_COLOR` | no | Set to disable colored output. Color is auto-disabled when output is piped or redirected. |
 
 The kit pays on Base by default and falls back to Polygon when a service offers no Base payment option. The chain is selected automatically per service, so there is nothing to configure.

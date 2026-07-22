@@ -351,7 +351,7 @@ export const circlePayService = createTool({
     'Base when the seller offers it, otherwise Polygon (the kit supports Base and Polygon). ' +
     'If the seller requires Gateway and the wallet has no Gateway balance, this fails with an ' +
     'actionable message: call circle_gateway_deposit for the same URL, then retry circle_pay_service. ' +
-    'Pass the `method` from circle_inspect_service: a GET service reads data as URL ' +
+    'Pass the `method` from circle_inspect_service: a GET service reads dataJson as URL ' +
     'query parameters, a POST/PUT/PATCH service reads it as a JSON body. Sending the wrong ' +
     'one makes the server see no input and still spends USDC, so always copy the inspected method.',
   inputSchema: z.object({
@@ -364,16 +364,33 @@ export const circlePayService = createTool({
         "HTTP method the service expects, copied from circle_inspect_service's `method` " +
           'field. Defaults to GET if omitted.',
       ),
-    data: z
-      .record(z.string(), z.unknown())
+    // A JSON string, not an object: an open payload object collapses to a
+    // closed, propertyless `{}` under the strict tool schema this SDK
+    // generates, so the model could never fill it and every paid call would
+    // POST an empty body. A string carries the payload verbatim instead.
+    dataJson: z
+      .string()
       .describe(
-        'Payload object matching the service input schema. For a GET service these become ' +
-          'query parameters; for POST/PUT/PATCH they become the JSON request body.',
+        'JSON-encoded payload object matching the service input schema, e.g. \'{"city":"NYC"}\'. ' +
+          'For a GET service these become query parameters; for POST/PUT/PATCH they become the ' +
+          'JSON request body. Pass "{}" if no payload is needed.',
       ),
   }),
   execute: async (input) => {
     const httpMethod = (input.method ?? 'GET').toUpperCase();
-    log(`circle_pay_service url=${input.url} from=${input.address} method=${httpMethod}`);
+    log(
+      `circle_pay_service url=${input.url} from=${input.address} method=${httpMethod} data=${preview(input.dataJson, 80)}`,
+    );
+
+    let data: Record<string, unknown>;
+    try {
+      data = JSON.parse(input.dataJson) as Record<string, unknown>;
+    } catch (e) {
+      log(`circle_pay_service ✗ invalid dataJson`);
+      throw new Error(
+        `dataJson is not valid JSON: ${(e as Error).message}. Re-check the service schema from circle_inspect_service.`,
+      );
+    }
 
     // Confirm the seller publishes a payment option on a chain the kit can pay,
     // and pick which chain to use. Base is preferred; Polygon is the fallback
@@ -420,7 +437,7 @@ export const circlePayService = createTool({
       const result = await payService({
         url: input.url,
         address: input.address,
-        data: input.data,
+        data,
         method: httpMethod,
         chain,
       });
@@ -441,9 +458,12 @@ export const circleGatewayDeposit = createTool({
   description:
     "Fund the wallet's Circle Gateway balance so it can pay a seller that requires " +
     'Gateway (batched) x402 payments. Pass the service URL; the kit confirms the seller ' +
-    'requires Gateway and picks the chain (Base preferred, else Polygon), then makes a direct ' +
-    'deposit on that chain (slower, 13-19 min, and it consumes gas on that chain). Spends USDC ' +
-    '(the deposit amount plus fee). After it succeeds, retry circle_pay_service for the same URL.',
+    'requires Gateway and picks the chain (Base preferred, else Polygon), then deposits on ' +
+    'that chain. Method auto-selected: Polygon sellers use the fast eco path (~30s, no gas on ' +
+    "source, USDC sourced from the wallet's Base USDC balance and landed in the Polygon " +
+    'Gateway pool); Base sellers use direct (13-19 min, consumes gas on Base). Spends USDC ' +
+    '(the deposit amount plus fee) and pauses for human approval. After it succeeds, retry ' +
+    'circle_pay_service for the same URL.',
   inputSchema: z.object({
     url: z.string().describe('The service URL this deposit is for.'),
     address: z.string().describe('Agent wallet address to deposit from (0x...).'),
@@ -486,9 +506,21 @@ export const circleGatewayDeposit = createTool({
       throw e;
     }
 
+    // Pick deposit method: Polygon Gateway sellers get the fast (~30s) eco
+    // method, which sources Base USDC and lands on Polygon. Base Gateway
+    // sellers must use direct (13-19 min) because eco's destination is
+    // hardcoded to Polygon by the CLI.
+    const depositMethod = chain === 'POLYGON' ? 'eco' : 'direct';
     try {
-      const result = await gatewayDeposit({ address: input.address, amount: input.amount, chain });
-      log(`circle_gateway_deposit ← ${result.amount} USDC on ${chainLabel(chain)} tx=${result.txId ?? 'n/a'}`);
+      const result = await gatewayDeposit({
+        address: input.address,
+        amount: input.amount,
+        chain,
+        method: depositMethod,
+      });
+      log(
+        `circle_gateway_deposit ← ${result.amount} USDC on ${chainLabel(chain)} via ${depositMethod} tx=${result.txId ?? 'n/a'}`,
+      );
       return result;
     } catch (e) {
       log(`circle_gateway_deposit ✗ ${(e as Error).message}`);

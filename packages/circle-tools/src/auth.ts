@@ -61,15 +61,37 @@ function rawText(e: unknown): string {
 /** `circle wallet status` exits non-zero when logged out; capture either way. */
 function statusText(): string {
   try {
-    return runCircle(['wallet', 'status']);
+    return runCircle(['wallet', 'status', '--type', 'agent', '--output', 'json']);
   } catch (e) {
     return rawText(e);
   }
 }
 
-/** An active session prints "Status:   VALID". */
+/**
+ * Return true if either the mainnet or testnet agent session is VALID.
+ *
+ * The CLI's human-readable output picks testnet first (`session.testnet ??
+ * session.mainnet`), so a text scan of "Status: VALID" misses a valid mainnet
+ * session when testnet is expired. The JSON output lists both environments, so
+ * we parse that and accept either one being valid.
+ */
 function isLoggedIn(status: string): boolean {
-  return /status:\s*valid/i.test(status);
+  try {
+    const raw = JSON.parse(status) as {
+      data?: { testnet?: { tokenStatus?: string }; mainnet?: { tokenStatus?: string } };
+      testnet?: { tokenStatus?: string };
+      mainnet?: { tokenStatus?: string };
+    };
+    // The CLI wraps successful output in a `data` envelope; unwrap if present.
+    const d = raw.data ?? raw;
+    return (
+      /valid/i.test(d.testnet?.tokenStatus ?? '') ||
+      /valid/i.test(d.mainnet?.tokenStatus ?? '')
+    );
+  } catch {
+    // Fall back to text matching when the CLI emits a plain-text error.
+    return /status:\s*valid/i.test(status);
+  }
 }
 
 /** Detect a pending Terms-of-Use gate in any CLI output. */

@@ -435,7 +435,7 @@ export function buildTools(ask: AskFn) {
         'vanilla x402, or Circle Gateway when the seller requires it. If the seller requires ' +
         'Gateway and the wallet has no Gateway balance, this fails with an actionable ' +
         'message: call circle_gateway_deposit for the same URL, then retry circle_pay_service. ' +
-        'Pass the `method` from circle_inspect_service: a GET service reads data as URL ' +
+        'Pass the `method` from circle_inspect_service: a GET service reads dataJson as URL ' +
         'query parameters, a POST/PUT/PATCH service reads it as a JSON body. Sending the wrong ' +
         'one makes the server see no input and still spends USDC, so always copy the inspected method.',
       parameters: z.object({
@@ -448,16 +448,33 @@ export function buildTools(ask: AskFn) {
             "HTTP method the service expects, copied from circle_inspect_service's `method` " +
               'field. Defaults to GET if omitted.',
           ),
-        data: z
-          .record(z.string(), z.unknown())
+        // A JSON string, not an object: an open payload object collapses to a
+        // closed, propertyless `{}` under the strict tool schema this SDK
+        // generates, so the model could never fill it and every paid call would
+        // POST an empty body. A string carries the payload verbatim instead.
+        dataJson: z
+          .string()
           .describe(
-            'Payload object matching the service input schema. For a GET service these become ' +
-              'query parameters; for POST/PUT/PATCH they become the JSON request body.',
+            'JSON-encoded payload object matching the service input schema, e.g. \'{"city":"NYC"}\'. ' +
+              'For a GET service these become query parameters; for POST/PUT/PATCH they become the ' +
+              'JSON request body. Pass "{}" if no payload is needed.',
           ),
       }),
-      execute: async ({ url, address, method, data }) => {
+      execute: async ({ url, address, method, dataJson }) => {
         const httpMethod = (method ?? 'GET').toUpperCase();
-        log(`circle_pay_service url=${url} from=${address} method=${httpMethod}`);
+        log(`circle_pay_service url=${url} from=${address} method=${httpMethod} data=${preview(dataJson, 80)}`);
+
+        let data: Record<string, unknown>;
+        try {
+          data = JSON.parse(dataJson) as Record<string, unknown>;
+        } catch (e) {
+          log(`circle_pay_service ✗ invalid dataJson`);
+          return toolError(
+            new Error(
+              `dataJson is not valid JSON: ${(e as Error).message}. Re-check the service schema from circle_inspect_service.`,
+            ),
+          );
+        }
 
         // ── Human-in-the-loop ──────────────────────────────────────────────
         // The Vercel AI SDK has no external approval hook: we pause execution

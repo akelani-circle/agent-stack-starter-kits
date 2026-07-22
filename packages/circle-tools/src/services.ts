@@ -287,10 +287,18 @@ export async function getServiceAccepts(url: string, method = 'GET'): Promise<Se
     );
   }
   // Read the challenge from either transport (v2 header or v1 body). A null
-  // result means no challenge was returned at all: most often a 405 from probing
-  // with the wrong method, so point the caller at passing the inspected method.
+  // result means no challenge was returned at all, and the right guidance
+  // depends on the status: a 2xx is a free endpoint that served data without
+  // demanding payment (so it should be read, not paid), whereas a non-2xx
+  // (typically 405) is most often a wrong-method probe missing the challenge.
   const accepts = await readAccepts(res);
   if (accepts === null) {
+    if (res.ok) {
+      throw new Error(
+        `${url} returned data without requiring payment (HTTP ${res.status}), so it is a free ` +
+          'endpoint, not a paid x402 resource. Read it with fetch_service instead of pay_service.',
+      );
+    }
     throw new Error(
       `${url} did not return an x402 challenge to a ${probeMethod} request (HTTP ${res.status}). ` +
         'If the service expects a different HTTP method, pass the `method` from ' +

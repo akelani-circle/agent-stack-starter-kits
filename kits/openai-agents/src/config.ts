@@ -25,7 +25,7 @@ export interface KitConfig {
   model: string;
 }
 
-const DEFAULT_MODEL = 'gpt-4.1';
+const DEFAULT_MODEL = 'gpt-5.4';
 
 /**
  * Load kit configuration from environment variables.
@@ -49,6 +49,6 @@ export function loadConfig(): KitConfig {
   return {
     chain,
     openaiApiKey,
-    model: process.env['LLM_MODEL'] ?? DEFAULT_MODEL,
+    model: process.env['LLM_MODEL']?.trim() || DEFAULT_MODEL,
   };
 }

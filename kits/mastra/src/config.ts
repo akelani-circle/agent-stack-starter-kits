@@ -23,12 +23,12 @@ export type LLMProvider = 'anthropic' | 'openai';
 export interface KitConfig {
   chain: string;
   provider: LLMProvider;
-  /** Full Mastra model string, e.g. "anthropic/claude-sonnet-4-6" or "openai/gpt-4.1". */
+  /** Full Mastra model string, e.g. "anthropic/claude-sonnet-4-6" or "openai/gpt-5.4". */
   model: string;
 }
 
 const DEFAULT_ANTHROPIC_MODEL = 'anthropic/claude-sonnet-4-6';
-const DEFAULT_OPENAI_MODEL = 'openai/gpt-4.1';
+const DEFAULT_OPENAI_MODEL = 'openai/gpt-5.4';
 
 /**
  * Load kit configuration from environment variables.
@@ -45,7 +45,7 @@ export function loadConfig(): KitConfig {
     return {
       chain,
       provider: 'anthropic',
-      model: env['LLM_MODEL'] ?? DEFAULT_ANTHROPIC_MODEL,
+      model: env['LLM_MODEL']?.trim() || DEFAULT_ANTHROPIC_MODEL,
     };
   }
 
@@ -53,7 +53,7 @@ export function loadConfig(): KitConfig {
     return {
       chain,
       provider: 'openai',
-      model: env['LLM_MODEL'] ?? DEFAULT_OPENAI_MODEL,
+      model: env['LLM_MODEL']?.trim() || DEFAULT_OPENAI_MODEL,
     };
   }
 

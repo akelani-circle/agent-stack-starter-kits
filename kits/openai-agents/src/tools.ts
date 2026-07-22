@@ -62,6 +62,19 @@ function preview(value: string, max = 120): string {
   return oneLine.length > max ? `${oneLine.slice(0, max)}…` : oneLine;
 }
 
+// Cap skill markdown returned to the model. These files can exceed 26 KB;
+// the actionable steps are always near the top, and oversized responses
+// balloon the conversation history across turns causing TPM 429s.
+const MAX_SKILL_CHARS = 8_000;
+
+function capSkill(body: string, name: string): string {
+  if (body.length <= MAX_SKILL_CHARS) return body;
+  return (
+    body.slice(0, MAX_SKILL_CHARS) +
+    `\n\n[...${body.length - MAX_SKILL_CHARS} chars omitted — re-fetch ${name} if you need the rest]`
+  );
+}
+
 export const fetchSetupSkillTool = tool({
   name: 'fetch_setup_skill',
   description: `Fetch the Circle Agent setup skill from ${SETUP_SKILL_URL}. Returns the raw markdown setup instructions to follow.`,
@@ -71,7 +84,7 @@ export const fetchSetupSkillTool = tool({
     try {
       const body = await fetchSetupSkill();
       log(`fetch_setup_skill ← ${body.length} bytes`);
-      return body;
+      return capSkill(body, 'fetch_setup_skill');
     } catch (e) {
       log(`fetch_setup_skill ✗ ${(e as Error).message}`);
       throw e;
@@ -93,7 +106,7 @@ export const fetchSubSkillTool = tool({
     try {
       const body = await fetchSubSkill(name);
       log(`fetch_sub_skill ← ${body.length} bytes`);
-      return body;
+      return capSkill(body, `fetch_sub_skill(${name})`);
     } catch (e) {
       log(`fetch_sub_skill ✗ ${(e as Error).message}`);
       throw e;
@@ -342,7 +355,7 @@ export const circlePayService = tool({
     'Base when the seller offers it, otherwise Polygon (the kit supports Base and Polygon). ' +
     'If the seller requires Gateway and the wallet has no Gateway balance, this fails with an ' +
     'actionable message: call circle_gateway_deposit for the same URL, then retry circle_pay_service. ' +
-    'Pass the `method` from circle_inspect_service: a GET service reads data as URL ' +
+    'Pass the `method` from circle_inspect_service: a GET service reads dataJson as URL ' +
     'query parameters, a POST/PUT/PATCH service reads it as a JSON body. Sending the wrong ' +
     'one makes the server see no input and still spends USDC, so always copy the inspected method.',
   needsApproval: true,
@@ -356,11 +369,31 @@ export const circlePayService = tool({
         "HTTP method the service expects, copied from circle_inspect_service's `method` " +
           'field. Defaults to GET if omitted.',
       ),
-    data: z.looseObject({}).describe('Payload object matching the service input schema.'),
+    // A JSON string, not an object: @openai/agents runs tools in strict mode,
+    // which forces every object schema to additionalProperties:false. An open
+    // payload object would collapse to a closed empty object the model can never
+    // fill, so it would always send {} and the server would reject the paid call.
+    dataJson: z
+      .string()
+      .describe(
+        'JSON-encoded payload object matching the service input schema, e.g. \'{"city":"NYC"}\'. ' +
+          'For a GET service these become query parameters (arrays repeat the key, e.g. ' +
+          'symbols=ETH&symbols=BTC); for POST/PUT/PATCH they become the JSON request body.',
+      ),
   }),
-  execute: async ({ url, address, method, data }) => {
+  execute: async ({ url, address, method, dataJson }) => {
     const httpMethod = (method ?? 'GET').toUpperCase();
-    log(`circle_pay_service url=${url} from=${address} method=${httpMethod}`);
+    log(`circle_pay_service url=${url} from=${address} method=${httpMethod} data=${preview(dataJson, 80)}`);
+
+    let data: Record<string, unknown>;
+    try {
+      data = JSON.parse(dataJson) as Record<string, unknown>;
+    } catch (e) {
+      log(`circle_pay_service ✗ invalid dataJson`);
+      throw new Error(
+        `dataJson is not valid JSON: ${(e as Error).message}. Re-check the service schema from circle_inspect_service.`,
+      );
+    }
 
     // Confirm the seller publishes a payment option on a chain the kit can pay,
     // and pick which chain to use. Base is preferred; Polygon is the fallback
@@ -404,7 +437,7 @@ export const circlePayService = tool({
     }
 
     try {
-      const result = await payService({ url, address, data: data as Record<string, unknown>, method: httpMethod, chain });
+      const result = await payService({ url, address, data, method: httpMethod, chain });
       const tx = (result as { txHash?: string }).txHash
         ? ` txHash=${(result as { txHash?: string }).txHash}`
         : '';
@@ -422,9 +455,12 @@ export const circleGatewayDeposit = tool({
   description:
     "Fund the wallet's Circle Gateway balance so it can pay a seller that requires " +
     'Gateway (batched) x402 payments. Pass the service URL; the kit confirms the seller ' +
-    'requires Gateway and picks the chain (Base preferred, else Polygon), then makes a direct ' +
-    'deposit on that chain (slower, 13-19 min, and it consumes gas on that chain). Spends USDC ' +
-    '(the deposit amount plus fee). After it succeeds, retry circle_pay_service for the same URL.',
+    'requires Gateway and picks the chain (Base preferred, else Polygon), then deposits on ' +
+    'that chain. Method auto-selected: Polygon sellers use the fast eco path (~30s, no gas on ' +
+    "source, USDC sourced from the wallet's Base USDC balance and landed in the Polygon " +
+    'Gateway pool); Base sellers use direct (13-19 min, consumes gas on Base). Spends USDC ' +
+    '(the deposit amount plus fee) and pauses for human approval. After it succeeds, retry ' +
+    'circle_pay_service for the same URL.',
   needsApproval: true,
   parameters: z.object({
     url: z.string().describe('The service URL this deposit is for.'),
@@ -468,9 +504,16 @@ export const circleGatewayDeposit = tool({
       throw e;
     }
 
+    // Pick deposit method: Polygon Gateway sellers get the fast (~30s) eco
+    // method, which sources Base USDC and lands on Polygon. Base Gateway
+    // sellers must use direct (13-19 min) because eco's destination is
+    // hardcoded to Polygon by the CLI.
+    const depositMethod = chain === 'POLYGON' ? 'eco' : 'direct';
     try {
-      const result = await gatewayDeposit({ address, amount, chain });
-      log(`circle_gateway_deposit ← ${result.amount} USDC on ${chainLabel(chain)} tx=${result.txId ?? 'n/a'}`);
+      const result = await gatewayDeposit({ address, amount, chain, method: depositMethod });
+      log(
+        `circle_gateway_deposit ← ${result.amount} USDC on ${chainLabel(chain)} via ${depositMethod} tx=${result.txId ?? 'n/a'}`,
+      );
       return JSON.stringify(result);
     } catch (e) {
       log(`circle_gateway_deposit ✗ ${(e as Error).message}`);

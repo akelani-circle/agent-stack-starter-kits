@@ -158,7 +158,7 @@ return {
 ### Provider-agnostic model selection
 
 `ANTHROPIC_API_KEY` → `anthropic('claude-sonnet-4-6')` via `@ai-sdk/anthropic`
-`OPENAI_API_KEY` → `openai('gpt-4.1')` via `@ai-sdk/openai`
+`OPENAI_API_KEY` → `openai('gpt-5.4')` via `@ai-sdk/openai`
 
 Both use the same `generateText` call; only the `LanguageModel` object changes.
 
@@ -191,7 +191,7 @@ messages = [...messages, ...next];
 | `LLM_MODEL` | no | see below | Raw model ID, no provider prefix |
 | `CIRCLE_CHAIN` | no | `BASE` | Chain for wallet operations |
 
-Default models: `claude-sonnet-4-6` (Anthropic), `gpt-4.1` (OpenAI).
+Default models: `claude-sonnet-4-6` (Anthropic), `gpt-5.4` (OpenAI).
 
 ---
 

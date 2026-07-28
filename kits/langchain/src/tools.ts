@@ -38,6 +38,10 @@ import {
 } from '@agent-stack-starter-kits/kit-core';
 import { bold, toolLine } from './theme';
 
+/** How the kits prompt a human; shared so prompt options (e.g. the OTP's
+ * `echo: false`) survive the trip from a tool down to the chat UI. */
+export type AskFn = circle.AskFn;
+
 const subSkillEnum = z.enum(SUB_SKILL_NAMES as [SubSkillName, ...SubSkillName[]]);
 const chainEnum = z.enum(CHAIN_VALUES);
 const methodEnum = z.enum(HTTP_METHOD_VALUES);
@@ -70,7 +74,7 @@ function err(e: unknown): string {
  * prompts for the email + OTP inline (the kit stores neither), letting the agent
  * recover an expired session mid-conversation instead of dead-ending.
  */
-export function buildTools(ask: (q: string) => Promise<string>) {
+export function buildTools(ask: AskFn) {
   // ── Auth tools ────────────────────────────────────────────────────────────
 
   const loginTool = tool(

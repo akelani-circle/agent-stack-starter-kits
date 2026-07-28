@@ -39,7 +39,9 @@ import {
 } from '@agent-stack-starter-kits/kit-core';
 import { bold, toolLine } from './theme';
 
-export type AskFn = (q: string) => Promise<string>;
+/** How the kits prompt a human; shared so prompt options (e.g. the OTP's
+ * `echo: false`) survive the trip from a tool down to the chat UI. */
+export type AskFn = circle.AskFn;
 
 const subSkillEnum = z.enum(SUB_SKILL_NAMES as [SubSkillName, ...SubSkillName[]]);
 const chainEnum = z.enum(CHAIN_VALUES);

@@ -37,11 +37,22 @@ export const TERMS_MESSAGE =
   '  circle wallet status\n\n' +
   'yourself, review and accept the Terms of Use when prompted, then re-run the demo.';
 
+export interface AskOptions {
+  /** False keeps the answer out of the terminal transcript (secrets). */
+  echo?: boolean;
+}
+
+/**
+ * How the kits prompt a human. The canonical shape, so a prompt raised down here
+ * (the OTP below) can ask the UI up there not to record the answer.
+ */
+export type AskFn = (question: string, options?: AskOptions) => Promise<string>;
+
 /** Terminal I/O the login flow drives. `ask` prompts the human (and is expected
  * to handle "exit"); `log` writes a namespaced status line; `bold` styles a
  * prompt label and defaults to identity for non-TTY callers. */
 export interface InteractiveIo {
-  ask: (q: string) => Promise<string>;
+  ask: AskFn;
   log: (line: string) => void;
   bold?: (s: string) => string;
 }
@@ -171,8 +182,12 @@ async function runEmailOtpLogin(io: Required<InteractiveIo>): Promise<void> {
       continue;
     }
 
+    // `echo: false`: the code is single-use and short-lived, but there is no
+    // reason to leave it sitting in the user's scrollback.
     const otp = (
-      await ask(`${bold('OTP from the email (6 digits, or full e.g. B1X-123456):')}\n> `)
+      await ask(`${bold('OTP from the email (6 digits, or full e.g. B1X-123456):')}\n> `, {
+        echo: false,
+      })
     ).trim();
     if (!otp) throw new Error('No OTP entered, cannot complete login.');
 

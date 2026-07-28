@@ -20,7 +20,7 @@ import type { CanUseTool, Options } from '@anthropic-ai/claude-agent-sdk';
 
 import type { KitConfig } from './config';
 import { dim, red } from './theme';
-import { buildCircleServer, MCP_SERVER_NAME } from './tools';
+import { buildCircleServer, MCP_SERVER_NAME, type AskFn } from './tools';
 
 /**
  * Build the Claude Agent SDK `query` options for the Autonomous Payment Agent.
@@ -45,7 +45,7 @@ import { buildCircleServer, MCP_SERVER_NAME } from './tools';
 export function buildQueryOptions(
   config: KitConfig,
   canUseTool: CanUseTool,
-  ask: (q: string) => Promise<string>,
+  ask: AskFn,
 ): Options {
   return {
     model: config.model,

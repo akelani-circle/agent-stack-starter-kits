@@ -39,6 +39,10 @@ import {
 } from '@agent-stack-starter-kits/kit-core';
 import { bold, toolLine } from './theme';
 
+/** How the kits prompt a human; shared so prompt options (e.g. the OTP's
+ * `echo: false`) survive the trip from a tool down to the chat UI. */
+export type AskFn = circle.AskFn;
+
 /**
  * The two tools that move USDC. The agent routes these through human approval
  * via its `beforeToolCallback`; every other tool runs without a pause.
@@ -421,7 +425,7 @@ const gatewayDepositTool = new FunctionTool({
  * inline (the kit stores neither), letting the agent recover an expired session
  * mid-conversation instead of dead-ending on "run it yourself".
  */
-export function buildTools(ask: (q: string) => Promise<string>) {
+export function buildTools(ask: AskFn) {
   const loginTool = new FunctionTool({
     name: 'circle_login',
     description: TOOL_DESCRIPTIONS.circle_login,

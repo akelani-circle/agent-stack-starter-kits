@@ -18,7 +18,7 @@
 
 import { Agent } from '@mastra/core/agent';
 import type { KitConfig } from './config';
-import { buildTools } from './tools';
+import { buildTools, type AskFn } from './tools';
 
 /**
  * Build the Mastra agent for the Autonomous Payment Agent demo.
@@ -29,7 +29,7 @@ import { buildTools } from './tools';
  * runtime from the Circle marketplace's own skill markdown, which the bootstrap
  * prompt fetches on the first turn.
  */
-export function buildAgent(config: KitConfig, ask: (q: string) => Promise<string>): Agent {
+export function buildAgent(config: KitConfig, ask: AskFn): Agent {
   return new Agent({
     id: 'circle-payment-agent',
     name: 'Circle Payment Agent',

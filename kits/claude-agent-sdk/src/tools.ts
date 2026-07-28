@@ -39,6 +39,10 @@ import {
 } from '@agent-stack-starter-kits/kit-core';
 import { bold, toolLine } from './theme';
 
+/** How the kits prompt a human; shared so prompt options (e.g. the OTP's
+ * `echo: false`) survive the trip from a tool down to the chat UI. */
+export type AskFn = circle.AskFn;
+
 /**
  * The Circle tools run as an in-process MCP server (`createSdkMcpServer`), the
  * Claude Agent SDK's native way to expose custom tools. Each tool is named
@@ -446,7 +450,7 @@ const ALL_TOOLS = [
  * inline (the kit stores neither), letting the agent recover an expired session
  * mid-conversation instead of dead-ending on "run it yourself".
  */
-export function buildCircleServer(ask: (q: string) => Promise<string>) {
+export function buildCircleServer(ask: AskFn) {
   const loginTool = tool(
     'circle_login',
     TOOL_DESCRIPTIONS.circle_login,

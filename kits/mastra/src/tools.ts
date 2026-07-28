@@ -39,6 +39,10 @@ import {
 } from '@agent-stack-starter-kits/kit-core';
 import { bold, toolLine } from './theme';
 
+/** How the kits prompt a human; shared so prompt options (e.g. the OTP's
+ * `echo: false`) survive the trip from a tool down to the chat UI. */
+export type AskFn = circle.AskFn;
+
 const subSkillEnum = z.enum(SUB_SKILL_NAMES as [SubSkillName, ...SubSkillName[]]);
 const chainEnum = z.enum(CHAIN_VALUES);
 const methodEnum = z.enum(HTTP_METHOD_VALUES);
@@ -56,7 +60,7 @@ function log(line: string): void {
  * the Vercel AI kit the approval gate lives inside the spend tool's `execute`
  * and runs before any USDC moves.
  */
-export function buildTools(ask: (q: string) => Promise<string>) {
+export function buildTools(ask: AskFn) {
   // ── Auth tools ────────────────────────────────────────────────────────────
 
   const loginTool = createTool({

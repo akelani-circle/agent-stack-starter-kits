@@ -19,7 +19,7 @@
 import 'dotenv/config';
 import { createInterface } from 'node:readline/promises';
 import { createChatUi, withRetry, type ChatUi } from '@agent-stack-starter-kits/agent-cli';
-import { ensureSession } from '@agent-stack-starter-kits/circle-tools';
+import { ensureSession, type AskOptions } from '@agent-stack-starter-kits/circle-tools';
 import { BOOTSTRAP_PROMPT, createBalanceReadout } from '@agent-stack-starter-kits/kit-core';
 import { onboardingWorkflow } from './workflow';
 import { buildAgent } from './agent';
@@ -49,8 +49,8 @@ function out(line: string): void {
 // passed as a getter because it only exists once main() creates the chat UI.
 const balance = createBalanceReadout(() => ui);
 
-async function ask(question: string): Promise<string> {
-  if (ui) return (await ui.ask(question)).trim();
+async function ask(question: string, options?: AskOptions): Promise<string> {
+  if (ui) return (await ui.ask(question, options)).trim();
   const rl = createInterface({ input: process.stdin, output: process.stdout });
   try {
     return (await rl.question(question)).trim();

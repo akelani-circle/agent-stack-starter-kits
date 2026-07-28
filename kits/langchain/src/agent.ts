@@ -24,7 +24,7 @@ import { SPEND_TOOL_NAMES } from '@agent-stack-starter-kits/kit-core';
 
 import type { KitConfig } from './config';
 import { kitLine, yellow } from './theme';
-import { buildTools } from './tools';
+import { buildTools, type AskFn } from './tools';
 
 const MAX_RETRIES = 4;
 
@@ -55,7 +55,7 @@ function makeOnFailedAttempt() {
   };
 }
 
-export function buildAgent(config: KitConfig, ask: (q: string) => Promise<string>) {
+export function buildAgent(config: KitConfig, ask: AskFn) {
   const tools = buildTools(ask);
   // maxRetries bounds the backoff so a sustained outage fails with a clear error
   // instead of hanging; onFailedAttempt makes each retry visible.

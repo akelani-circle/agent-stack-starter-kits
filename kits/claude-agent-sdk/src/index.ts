@@ -24,7 +24,7 @@ import {
   type SDKUserMessage,
 } from '@anthropic-ai/claude-agent-sdk';
 import { createChatUi, type ChatUi } from '@agent-stack-starter-kits/agent-cli';
-import { ensureSession } from '@agent-stack-starter-kits/circle-tools';
+import { ensureSession, type AskFn } from '@agent-stack-starter-kits/circle-tools';
 
 import { BOOTSTRAP_PROMPT, createBalanceReadout } from '@agent-stack-starter-kits/kit-core';
 import { buildQueryOptions } from './agent';
@@ -113,8 +113,8 @@ async function main(): Promise<void> {
   // pinned input box the chat UI renders at the bottom of the terminal.
   // `exit` typed at ANY prompt halts the demo immediately, tearing down the UI
   // (which restores the console) before the answer reaches the caller.
-  const ask = async (q: string): Promise<string> => {
-    const answer = await chat.ask(q);
+  const ask: AskFn = async (q, options) => {
+    const answer = await chat.ask(q, options);
     if (answer.trim().toLowerCase() === 'exit') {
       log('exit, halting.');
       chat.close();

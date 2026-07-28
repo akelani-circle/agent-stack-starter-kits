@@ -19,7 +19,7 @@
 import { LlmAgent, Gemini, type SingleBeforeToolCallback } from '@google/adk';
 
 import type { KitConfig } from './config';
-import { buildTools, SPEND_TOOLS } from './tools';
+import { buildTools, SPEND_TOOLS, type AskFn } from './tools';
 
 /**
  * Signature the entry point uses to drive an approval prompt for a single
@@ -50,7 +50,7 @@ const SPEND_TOOL_SET = new Set<string>(SPEND_TOOLS);
 export function buildAgent(
   config: KitConfig,
   approve: ApprovalFn,
-  ask: (q: string) => Promise<string>,
+  ask: AskFn,
 ): LlmAgent {
   const tools = buildTools(ask);
 

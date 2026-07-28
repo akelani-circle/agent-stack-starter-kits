@@ -34,6 +34,7 @@ import {
   circlePayService,
   circleGatewayDeposit,
   buildAuthTools,
+  type AskFn,
 } from './tools';
 
 /**
@@ -44,7 +45,7 @@ import {
  * arrives at runtime from the Circle marketplace's own skill markdown, which
  * the bootstrap prompt fetches on the first turn.
  */
-export function buildAgent(config: KitConfig, ask: (q: string) => Promise<string>): Agent {
+export function buildAgent(config: KitConfig, ask: AskFn): Agent {
   const { loginTool, logoutTool } = buildAuthTools(ask);
   return new Agent({
     name: 'Circle Payment Agent',

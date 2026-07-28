@@ -25,7 +25,7 @@ import {
   isRetryableError,
   type ChatUi,
 } from '@agent-stack-starter-kits/agent-cli';
-import { ensureSession } from '@agent-stack-starter-kits/circle-tools';
+import { ensureSession, type AskFn } from '@agent-stack-starter-kits/circle-tools';
 import { loadConfig, type KitConfig } from './config';
 import { runTurn } from './agent';
 import { buildTools, type CircleTools } from './tools';
@@ -93,8 +93,8 @@ async function main(): Promise<void> {
 
   // Shared `ask` that routes every prompt through the pinned input box and
   // supports the "exit" escape hatch at any point (auth, approval, follow-up).
-  const ask = async (question: string): Promise<string> => {
-    const answer = await chat.ask(question);
+  const ask: AskFn = async (question, options) => {
+    const answer = await chat.ask(question, options);
     if (answer.trim().toLowerCase() === 'exit') {
       log('exit, halting.');
       chat.close();

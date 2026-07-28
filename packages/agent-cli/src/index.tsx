@@ -48,12 +48,24 @@ export {
   type WithRetryOptions,
 } from './retry';
 
+export interface AskOptions {
+  /**
+   * Whether the submitted answer is committed to the scrollback. Defaults to
+   * true, which is what makes a finished session read as a conversation rather
+   * than as the agent talking to itself.
+   *
+   * Pass false for secrets (the email OTP): the prompt is still recorded, but
+   * the value is replaced by a mask so the code never lands in terminal history.
+   */
+  echo?: boolean;
+}
+
 /** Imperative handle the kits drive; identical shape in TTY and non-TTY modes. */
 export interface ChatUi {
   /** Append one line to the scrollback log (keeps any embedded ANSI color). */
   log(line: string): void;
   /** Pin `question` at the bottom and resolve with the line the user submits. */
-  ask(question: string): Promise<string>;
+  ask(question: string, options?: AskOptions): Promise<string>;
   /**
    * Legacy no-op, kept so the kits' existing calls still compile.
    *
@@ -112,6 +124,30 @@ function toLabel(question: string): string {
   return question.replace(/[\s>]+$/, '');
 }
 
+// Dependency-free ANSI, the same approach as kit-core's theme (specific close
+// codes so nested stylers don't cancel each other), including its rule for when
+// to color at all: never into a pipe or a file, never under NO_COLOR. Kept local
+// because this package deliberately has no kit dependencies.
+const colored = Boolean(process.stdout.isTTY) && !process.env['NO_COLOR'];
+const userStyle = (s: string): string => (colored ? `\x1b[1m\x1b[36m${s}\x1b[39m\x1b[22m` : s);
+
+const MASK = '••••••';
+
+/**
+ * Render one finished exchange as a scrollback line: the prompt exactly as it
+ * was posed, followed by what the user typed, styled so their turns stand out
+ * from the agent's output and the `[kit]` framework lines.
+ *
+ * This exists because Ink holds the terminal in raw mode and draws the input in
+ * a live region: nothing records the answer unless we do it here. Under the
+ * readline prompts this UI replaced, the terminal's own echo left the exchange
+ * in the scrollback for free.
+ */
+function echoLine(question: string, value: string, echo: boolean): string {
+  const shown = echo ? value : value && MASK;
+  return `${question}${userStyle(shown)}`;
+}
+
 function createInkUi(options: ChatUiOptions): ChatUi {
   const initialLogs: LogItem[] = options.title ? [{ id: 0, text: options.title }] : [];
   // Starts with no question pending: the kit is booting (config, session check,
@@ -136,11 +172,15 @@ function createInkUi(options: ChatUiOptions): ChatUi {
     emit();
   };
 
-  // One pending question at a time: the kits await ask() sequentially.
+  // One pending question at a time: the kits await ask() sequentially, so a
+  // single `echo` flag alongside the resolver is enough to carry the current
+  // question's option through to submit.
   let resolveAsk: ((value: string) => void) | null = null;
-  const ask = (question: string): Promise<string> =>
+  let echoAnswer = true;
+  const ask = (question: string, options: AskOptions = {}): Promise<string> =>
     new Promise<string>((resolve) => {
       resolveAsk = resolve;
+      echoAnswer = options.echo !== false;
       // Re-enabling the input is the one moment control returns to the user, so
       // this is also the moment the busy indicator stops — by construction now,
       // since both read the same field.
@@ -149,10 +189,20 @@ function createInkUi(options: ChatUiOptions): ChatUi {
     });
   const submit = (value: string): void => {
     const resolve = resolveAsk;
+    // No pending question means a stray Enter while the agent works: drop it,
+    // rather than committing an orphan prompt line to the scrollback.
+    if (!resolve) return;
     resolveAsk = null;
-    snapshot = { ...snapshot, question: null };
+    // Commit the prompt and the answer together, in the same update that clears
+    // the input, so the exchange reaches the scrollback as one atomic step.
+    const text = echoLine(snapshot.question ?? '', value, echoAnswer);
+    snapshot = {
+      ...snapshot,
+      logs: [...snapshot.logs, { id: nextId++, text }],
+      question: null,
+    };
     emit();
-    resolve?.(value);
+    resolve(value);
   };
 
   // No-op: the indicator follows the input state (see ChatUi.setStatus).
@@ -280,10 +330,16 @@ function App({ store, onSubmit }: { store: Store; onSubmit: (value: string) => v
 function createPlainUi(): ChatUi {
   return {
     log: (line: string) => console.log(line),
-    ask: async (question: string): Promise<string> => {
+    ask: async (question: string, options: AskOptions = {}): Promise<string> => {
       const rl = createInterface({ input: process.stdin, output: process.stdout });
       try {
-        return await rl.question(question);
+        const answer = await rl.question(question);
+        // Echo into the output stream. This mode is only reached when stdin or
+        // stdout is not a terminal, so nothing double-prints: a tty echo of the
+        // user's keystrokes goes to the terminal, this line goes to the pipe or
+        // file, and each sink ends up with the exchange exactly once.
+        console.log(echoLine('', answer, options.echo !== false));
+        return answer;
       } finally {
         rl.close();
       }

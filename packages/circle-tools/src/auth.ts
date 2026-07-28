@@ -220,6 +220,28 @@ function withDefaults(io: InteractiveIo): Required<InteractiveIo> {
 }
 
 /**
+ * Non-interactive session gate: return normally when a valid agent session
+ * exists, throw an actionable error otherwise. Never prompts and never accepts
+ * the Terms of Use.
+ *
+ * This is the counterpart to `ensureSession` for contexts that cannot prompt —
+ * a framework workflow step, a background job, a CI run. Callers there must not
+ * re-derive "am I logged in?" from CLI text: the human-readable `wallet status`
+ * lists mainnet and testnet separately, so scanning it for "Not logged in"
+ * reports a logged-out session whenever *either* environment is logged out.
+ * `sessionStatus` parses the JSON output and accepts either one being valid.
+ */
+export function requireSession(): void {
+  const { loggedIn, termsPending: pending, raw } = sessionStatus();
+  if (loggedIn) return;
+  if (pending) throw new Error(TERMS_MESSAGE);
+  throw new Error(
+    `No valid Circle agent session (status: ${raw.trim()}). Run the demo from an ` +
+      'interactive terminal and complete the email OTP login, then retry.',
+  );
+}
+
+/**
  * Ensure the Circle CLI has a valid agent session.
  *
  * - Already logged in -> returns `{ status: 'already-valid' }` immediately.

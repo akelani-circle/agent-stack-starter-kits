@@ -89,6 +89,11 @@ async function main(): Promise<void> {
   const run = await onboardingWorkflow.createRun();
   let result = await run.start({ inputData: {} });
 
+  // Generic resume driver: no shipped step suspends (login is handled up front
+  // by `ensureSession`), but any human-in-the-loop step added to the workflow
+  // gets prompted through the chat UI without touching this file. A suspending
+  // step must `suspend(...)` and then return immediately — on resume Mastra
+  // re-executes it from the top with `resumeData` set.
   while (result.status === 'suspended') {
     const suspendedEntry = Object.entries(result.steps).find(([, s]) => s.status === 'suspended');
     if (!suspendedEntry) break;

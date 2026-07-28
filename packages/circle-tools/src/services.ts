@@ -32,8 +32,10 @@ import type {
   ServiceAccepts,
   ServiceInspection,
 } from './types';
+import { bindUrl, findPathPlaceholders, unfilledPlaceholderMessage } from './paths';
 import {
   buildResponseVocab,
+  declaredQueryParams,
   findFieldViolations,
   preSpendErrorMessage,
   requestSchemaShape,
@@ -431,28 +433,6 @@ function explainPayError(e: unknown, url: string): Error {
 const BODY_METHODS = new Set(['POST', 'PUT', 'PATCH']);
 
 /**
- * Encode a flat payload object onto a URL's query string. Array values become
- * repeated keys (`symbols=ETH&symbols=BTC`), matching how x402 GET services
- * publish their input. Non-string scalars are stringified; nested objects are
- * JSON-encoded so nothing is silently dropped. Existing query params on the URL
- * are preserved.
- */
-function appendQuery(url: string, data: Record<string, unknown>): string {
-  const u = new URL(url);
-  for (const [key, value] of Object.entries(data)) {
-    if (value === undefined || value === null) continue;
-    if (Array.isArray(value)) {
-      for (const item of value) u.searchParams.append(key, String(item));
-    } else if (typeof value === 'object') {
-      u.searchParams.append(key, JSON.stringify(value));
-    } else {
-      u.searchParams.append(key, String(value));
-    }
-  }
-  return u.toString();
-}
-
-/**
  * Best-effort tx-hash extraction. A bare 64-hex hash in the text wins; failing
  * that, x402 settle receipts (the `x-payment-response` header surfaced as
  * `payment.receipt`) are base64-encoded JSON like `{"transaction":"0x..."}`, so
@@ -485,6 +465,11 @@ interface RawPayEnvelope {
  * endpoint makes the server see no input (and still spends USDC, since the x402
  * payment is submitted before the request resolves).
  *
+ * Ahead of that split, path parameters are bound: a marketplace resource is a
+ * *template* (`/flights/{ident}`), and a field belonging to its path has to be
+ * substituted into the path rather than appended to the query, where the server
+ * would never read it. See `./paths`.
+ *
  * `--output json` is required. The CLI's default `table` output for a paid call
  * prints *only the service response body, with no tx hash* — so a hash-presence
  * check there fails on every successful payment whose body has no 0x… hash,
@@ -505,13 +490,12 @@ interface RawPayEnvelope {
  * the payment proceeds, so a flaky spec fetch never blocks an otherwise valid
  * call. Only a positively-proven-invalid value stops the payment.
  */
-async function assertPayloadValid(input: PayServiceInput, method: string): Promise<void> {
-  let inspection: ServiceInspection;
-  try {
-    inspection = await inspectService({ url: input.url });
-  } catch {
-    return; // Cannot read constraints; do not block the payment.
-  }
+async function assertPayloadValid(
+  input: PayServiceInput,
+  method: string,
+  inspection: ServiceInspection | null,
+): Promise<void> {
+  if (!inspection) return; // Cannot read constraints; do not block the payment.
   const shape = requestSchemaShape(inspection.schema);
   if (!shape) return;
   let vocab: Set<string> | null = null;
@@ -528,13 +512,48 @@ async function assertPayloadValid(input: PayServiceInput, method: string): Promi
 
 export async function payService(input: PayServiceInput): Promise<PaymentResult> {
   const method = (input.method ?? 'GET').toUpperCase();
+  // Read the seller's published contract once; both guards below rely on it, and
+  // neither is worth a second CLI round trip. A failure here means "unknown", and
+  // every check downstream treats unknown as permission to proceed.
+  let inspection: ServiceInspection | null = null;
+  try {
+    inspection = await inspectService({ url: input.url });
+  } catch {
+    inspection = null;
+  }
+
   // Guard the payload against the seller's published constraints before spending;
   // x402 charges before the server validates, so a provably-bad field must be
   // caught here, not after the USDC is gone.
-  await assertPayloadValid(input, method);
+  await assertPayloadValid(input, method, inspection);
 
+  // Bind path parameters before spending. A marketplace resource is a template,
+  // so a payload field belonging to the path has to be substituted into it: left
+  // on the query string it is ignored and the server reads the placeholder itself
+  // as the value, which is a paid failure every time.
   const sendsBody = BODY_METHODS.has(method);
-  const url = sendsBody ? input.url : appendQuery(input.url, input.data);
+  const placeholders = await findPathPlaceholders(input.url, method);
+  const declaredQuery = declaredQueryParams(inspection?.schema);
+  // A body method still needs its path bound, but its payload belongs in the body,
+  // so only path-eligible fields are offered to the binder.
+  const bindable = sendsBody
+    ? Object.fromEntries(
+        Object.entries(input.data).filter(([k]) =>
+          placeholders.some((p) => p.name.toLowerCase() === k.toLowerCase()),
+        ),
+      )
+    : input.data;
+  const bound = bindUrl(input.url, bindable, placeholders, declaredQuery);
+  if (bound.unfilled.length) {
+    throw new Error(unfilledPlaceholderMessage(input.url, bound.unfilled, input.data));
+  }
+  const url = bound.url;
+  // Fields consumed by the path must not be repeated in the body.
+  const body = sendsBody
+    ? Object.fromEntries(
+        Object.entries(input.data).filter(([k]) => !bound.boundKeys.includes(k)),
+      )
+    : null;
   const args = [
     'services',
     'pay',
@@ -550,8 +569,8 @@ export async function payService(input: PayServiceInput): Promise<PaymentResult>
     '--output',
     'json',
   ];
-  if (sendsBody) {
-    args.push('--data', JSON.stringify(input.data));
+  if (body) {
+    args.push('--data', JSON.stringify(body));
   }
 
   let out: string;

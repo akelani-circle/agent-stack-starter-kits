@@ -62,16 +62,25 @@ export interface FieldValidation {
 }
 
 /**
- * Locate the request-input properties in an inspect schema. POST/PUT/PATCH put
- * them under `body`; GET/DELETE under `query`. The container key varies across
- * CLI versions, so several are tried before falling back to the schema root.
+ * Container keys an inspect schema may nest its request inputs under, most
+ * specific first. POST/PUT/PATCH put them under `body`; GET/DELETE under one of
+ * the query aliases. `queryParams` is what CLI 0.0.6 emits and MUST be listed:
+ * without it every GET service falls through to the schema root, which holds no
+ * `properties` of its own, so the whole guard silently disables itself on the
+ * exact methods it is most needed for.
+ */
+const SCHEMA_CONTAINERS = ['body', 'queryParams', 'query', 'querystring', 'params'] as const;
+
+/**
+ * Locate the request-input properties in an inspect schema, trying each known
+ * container before falling back to the schema root.
  */
 export function requestSchemaShape(
   schema: unknown,
 ): { properties: Record<string, unknown>; required: string[] } | null {
   if (!schema || typeof schema !== 'object') return null;
   const s = schema as Record<string, unknown>;
-  const containers = [s.body, s.query, s.querystring, s.params, s];
+  const containers = [...SCHEMA_CONTAINERS.map((k) => s[k]), s];
   for (const c of containers) {
     if (c && typeof c === 'object') {
       const props = (c as Record<string, unknown>).properties;
@@ -82,6 +91,31 @@ export function requestSchemaShape(
           required: Array.isArray(req) ? req.map(String) : [],
         };
       }
+    }
+  }
+  return null;
+}
+
+/**
+ * The query-parameter names a service declares, or null when it declares none in
+ * a form we recognise.
+ *
+ * This is the authority on which payload fields belong on the query string, and
+ * so, by elimination, on which do not — the test the path binder uses before it
+ * pulls a field out of the query and into a URL path segment. A null result
+ * means "unknown", never "empty", so an unrecognised schema shape simply leaves
+ * the binder with less to go on rather than mislabelling every field.
+ */
+export function declaredQueryParams(schema: unknown): Set<string> | null {
+  if (!schema || typeof schema !== 'object') return null;
+  const s = schema as Record<string, unknown>;
+  for (const key of ['queryParams', 'query', 'querystring'] as const) {
+    const container = s[key];
+    if (!container || typeof container !== 'object') continue;
+    const props = (container as Record<string, unknown>).properties;
+    if (props && typeof props === 'object') {
+      const names = Object.keys(props as Record<string, unknown>);
+      if (names.length) return new Set(names);
     }
   }
   return null;

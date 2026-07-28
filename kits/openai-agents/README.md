@@ -17,8 +17,12 @@ An Autonomous Payment Agent built with the [OpenAI Agents SDK](https://openai.gi
 git clone <repo-url> && cd circle-agent-stack-examples
 bun install
 cp kits/openai-agents/.env.example kits/openai-agents/.env   # then fill in keys
-bun --filter @agent-stack-ecosystem-kits/kit-openai-agents demo
+bun run --cwd kits/openai-agents demo
 ```
+
+> Run the demo with `--cwd`, not `bun --filter`. `--filter` wraps output in a
+> dashboard that elides lines and interferes with the interactive approval
+> prompt; `--cwd` runs the script directly with plain, full output.
 
 ## Skill reference
 

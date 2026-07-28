@@ -1,68 +1,46 @@
 # Mastra × Circle Agent Stack
 
-## What it is
-
-An Autonomous Payment Agent built with [Mastra](https://mastra.ai). From a single TypeScript entry point, the agent bootstraps via the Circle Agent Skill, creates an agent wallet on BASE, checks balances, discovers an x402-compatible service on the Circle Agent Marketplace, and pays for it using a USDC nanopayment.
+An agent built with [Mastra](https://mastra.ai) that owns a USDC wallet and pays for services on the [Circle Agent Marketplace](https://agents.circle.com/services) on your behalf. It boots from Circle's own [setup skill](https://agents.circle.com/skills/setup.md), fetched at runtime, then drops you into a terminal chat.
 
 ## Prerequisites
 
-- Node.js 20+
-- Circle CLI: `npm install -g @circle-fin/cli`
-- Circle Agent Skill installed for your agent host (see [Skill install](#skill-install))
-- A Circle API key and an `OPENAI_API_KEY`
+- [Bun](https://bun.com) 1.2+
+- Circle CLI: `bun add -g @circle-fin/cli`
+- A Circle account, plus an `ANTHROPIC_API_KEY` or `OPENAI_API_KEY`
 
-## Quickstart
+## Run
 
 ```bash
-git clone <repo-url> && cd circle-agent-stack-examples
 bun install
-cp kits/mastra/.env.example kits/mastra/.env   # then fill in keys
+cp kits/mastra/.env.example kits/mastra/.env   # add your API key
 bun run --cwd kits/mastra demo
 ```
 
-> Run the demo with `--cwd`, not `bun --filter`. `--filter` wraps output in a
-> dashboard that elides lines and interferes with the interactive approval
-> prompt; `--cwd` runs the script directly with plain, full output.
+Use `--cwd`, not `bun --filter`: the filter dashboard elides output and interferes with the approval prompt.
 
-## Skill reference
+## First run
 
-The agent boots from the official setup skill:
+- **Login.** The demo checks your Circle session and, if needed, logs you in with your email and a one-time code. You type both; the kit stores neither.
+- **Terms of Use.** If your account has not accepted Circle's Terms, the demo stops and asks you to run `circle wallet status` once and accept them yourself — an agent must never accept them for you.
+- **Approval.** Before anything spends USDC, the pending call is printed and waits for `y/N`. Nothing is spent unless you approve.
+- Type `exit` or `quit` to end the session.
 
-> Run `curl -sL https://agents.circle.com/skills/setup.md`, and use the returned setup instructions to set up my agent wallet.
+## Try it
 
-See https://agents.circle.com/skills/setup.md.
+Once the wallet is set up, ask for what you want in plain language:
 
-### Skill install
+- `check my flight WN2417 using FlightAware`
+- `what services are available for weather data?`
+- `top up my wallet with testnet USDC`
 
-```bash
-npm install -g @circle-fin/cli
-circle login
-circle skill install --tool claude-code   # or: cursor | codex | opencode | amp
+## Environment
 
-# Universal fallback (any host):
-npx skills add circlefin/skills -g
-```
-
-## Architecture
-
-```
-┌─────────────────────────────┐
-│   Mastra Agent              │
-│   (tool-calling loop)       │
-└──────────────┬──────────────┘
-               │ tool calls
-               ▼
-┌─────────────────────────────┐
-│  @.../circle-tools          │
-│  (execSync → circle CLI)    │
-└──────────────┬──────────────┘
-               │
-               ▼
-┌─────────────────────────────┐
-│  Circle Agent Stack         │
-│  wallets · services · x402  │
-└─────────────────────────────┘
-```
+| Variable | Required | Notes |
+| --- | --- | --- |
+| `ANTHROPIC_API_KEY` *or* `OPENAI_API_KEY` | one of | Anthropic is used when both are set. |
+| `LLM_MODEL` | no | Include the provider prefix, e.g. `anthropic/claude-opus-4-7`. Defaults: `anthropic/claude-sonnet-4-6`, `openai/gpt-5.4`. |
+| `CIRCLE_CHAIN` | no | Only labels the startup line. The payment chain is picked per service — Base, or Polygon when a service offers no Base option. |
+| `NO_COLOR` | no | Disables colored output. Color is off automatically when output is piped. |
 
 ## Links
 

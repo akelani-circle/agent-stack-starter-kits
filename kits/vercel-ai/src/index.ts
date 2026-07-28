@@ -24,17 +24,17 @@ import {
   withRetry,
   isRetryableError,
   type ChatUi,
-} from '@agent-stack-ecosystem-kits/agent-cli';
+} from '@agent-stack-starter-kits/agent-cli';
 import {
   ensureSession,
   formatUsdcBalance,
   walletUsdcBalance,
-} from '@agent-stack-ecosystem-kits/circle-tools';
+} from '@agent-stack-starter-kits/circle-tools';
 import { loadConfig, type KitConfig } from './config';
 import { runTurn } from './agent';
 import { buildTools, type CircleTools } from './tools';
 import { isQuotaExhausted } from './retry';
-import { SETUP_SKILL_URL } from './skill';
+import { BOOTSTRAP_PROMPT } from '@agent-stack-starter-kits/kit-core';
 import { bold, dim, kitLine, red, yellow } from './theme';
 
 // The chat UI pins the input to the bottom while logs scroll above it. It is
@@ -128,15 +128,12 @@ async function main(): Promise<void> {
 
     // ── Bootstrap ─────────────────────────────────────────────────────────────
     // The first turn is driven by the Circle setup skill, not a system prompt.
-    const bootstrapPrompt =
-      `Run curl -sL ${SETUP_SKILL_URL}, ` +
-      'and use the returned setup instructions to set up my agent wallet.';
-
+    //
     // Conversation history — the running CoreMessage[] that grows each turn.
     // Vercel AI SDK's `generateText` is stateless: we own the history and pass
     // it back on every call. `result.response.messages` gives us all the
     // assistant + tool-result messages the SDK generated so we can append them.
-    let messages: CoreMessage[] = [{ role: 'user', content: bootstrapPrompt }];
+    let messages: CoreMessage[] = [{ role: 'user', content: BOOTSTRAP_PROMPT }];
 
     // Build the tool set — `ask` is passed in so the two spend tools can pause
     // and prompt for human approval before touching USDC. This is the Vercel AI

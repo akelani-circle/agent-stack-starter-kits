@@ -50,6 +50,17 @@ export interface DeployWalletInput {
   chain?: Chain;
 }
 
+/** How `circle wallet fund` sources the testnet USDC. */
+export type FundMethod = 'crypto' | 'fiat';
+
+export interface FundWalletInput {
+  address: string;
+  /** `crypto` draws from the testnet faucet, `fiat` runs the test card flow. Defaults to `crypto`. */
+  method?: FundMethod;
+  /** Chain to fund on. Defaults to Base. */
+  chain?: Chain;
+}
+
 /** Tokens the fiat on-ramp can buy. `usdc` is the default. */
 export type FundToken = 'usdc' | 'eurc' | 'eth' | 'native';
 
@@ -159,6 +170,28 @@ export async function listWallets(): Promise<AgentWallet[]> {
   );
   const list = raw.data?.wallets ?? [];
   return list.map((w) => ({ address: w.address }));
+}
+
+/**
+ * `circle wallet fund --address <addr> --chain <chain> --method <method>`
+ *
+ * Testnet funding. The CLI's output is handed back verbatim rather than parsed:
+ * it differs by method (the faucet reports a transfer, the test card flow
+ * reports a checkout), and neither shape is stable enough to normalise.
+ */
+export async function fundWallet(input: FundWalletInput): Promise<string> {
+  return runCircle([
+    'wallet',
+    'fund',
+    '--address',
+    input.address,
+    '--chain',
+    chainCli(input.chain ?? DEFAULT_CHAIN),
+    '--method',
+    input.method ?? 'crypto',
+    '--output',
+    'json',
+  ]);
 }
 
 /** `circle wallet balance --address <addr> --chain <chain> --output json` */

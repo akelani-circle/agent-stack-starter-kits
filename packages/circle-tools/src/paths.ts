@@ -43,6 +43,16 @@
  *      recovered from the origin's own routing metadata (the `x-matched-path`
  *      response header, which reports the matched route as `/flights/[id]`).
  *
+ * A bare placeholder does not always arrive under the route's own parameter
+ * name. A caller that knows the field as `ident` will write `/flights/ident`
+ * where the route declares `[id]`, and that segment is a placeholder just as
+ * surely as `/flights/id` is — so a segment matching any field name the call
+ * itself carries counts as unfilled too (see `placeholdersFromTemplate`).
+ *
+ * The value to bind is likewise taken from wherever the caller put it: the
+ * payload first, and failing that the URL's own query string, since
+ * `/flights/id?ident=WN2417` carries the value the path is missing.
+ *
  * Recovery is best-effort and FAILS OPEN: when no template can be recovered, the
  * URL is left exactly as published and the payload goes to the query string, the
  * historical behaviour. Nothing here blocks a call it cannot prove is broken.
@@ -70,6 +80,8 @@ export interface BoundUrl {
   unfilled: PathPlaceholder[];
   /** Payload keys consumed by the path and therefore kept out of the query. */
   boundKeys: string[];
+  /** Query keys already on the URL that were moved into the path. */
+  boundQueryKeys: string[];
 }
 
 /** Split a pathname into its non-empty segments. */
@@ -134,19 +146,49 @@ async function probeMatchedPath(url: string, method: string): Promise<string | n
 }
 
 /**
+ * The names a call refers to its own inputs by: its payload keys plus the query
+ * keys already on its URL, lower-cased for comparison.
+ *
+ * These are what a bare placeholder can masquerade as when it does not arrive
+ * under the route's own parameter name, so they are collected from the call
+ * rather than from the service's published schema — a caller that writes
+ * `/flights/ident` is naming the field it holds, whether or not the seller
+ * declares it.
+ */
+export function requestFieldNames(url: string, data: Record<string, unknown>): Set<string> {
+  const names = new Set(Object.keys(data).map((k) => k.toLowerCase()));
+  try {
+    for (const key of new URL(url).searchParams.keys()) names.add(key.toLowerCase());
+  } catch {
+    // An unparseable URL contributes no names; the payload's still count.
+  }
+  return names;
+}
+
+/**
  * Align a recovered route template against the URL's own segments to find which
  * of them are parameters that are still carrying their template value.
  *
- * A recovered placeholder counts as unfilled only when the URL segment sitting
- * in that position *is* the parameter's name (`id` under `[id]`) or is itself
- * delimited. Any other value is a real one the caller already substituted, so a
- * URL that has been bound once is never re-bound — re-running this over
+ * A recovered placeholder counts as unfilled when the URL segment sitting in
+ * that position is delimited, *is* the parameter's name (`id` under `[id]`), or
+ * is the name of a field the call itself carries (`ident` under `[id]`, on a
+ * call whose payload or query string has an `ident`). That last case is the one
+ * a caller reaches by renaming the segment rather than filling it: the route
+ * says the position is a parameter, and a segment spelled exactly like one of
+ * the call's own field names is that field's label, not its value.
+ *
+ * Any other value is a real one the caller already substituted, so a URL that
+ * has been bound once is never re-bound — re-running this over
  * `/flights/WN2417` finds nothing to fill, which is what makes a retry safe.
  *
  * Templates whose segment count differs from the URL's are ignored: the header
  * described some rewrite or fallback route, not this path.
  */
-export function placeholdersFromTemplate(pathname: string, template: string): PathPlaceholder[] {
+export function placeholdersFromTemplate(
+  pathname: string,
+  template: string,
+  fieldNames: Set<string> = new Set(),
+): PathPlaceholder[] {
   const actual = segmentsOf(pathname);
   const declared = segmentsOf(template.split('?')[0] ?? '');
   if (declared.length !== actual.length) return [];
@@ -155,7 +197,10 @@ export function placeholdersFromTemplate(pathname: string, template: string): Pa
     const name = explicitName(segment);
     if (!name) return;
     const value = decodeURIComponent(actual[index] ?? '');
-    const stillTemplate = value.toLowerCase() === name.toLowerCase() || explicitName(value) !== null;
+    const stillTemplate =
+      value.toLowerCase() === name.toLowerCase() ||
+      fieldNames.has(value.toLowerCase()) ||
+      explicitName(value) !== null;
     if (stillTemplate) out.push({ name, index });
   });
   return out;
@@ -164,8 +209,15 @@ export function placeholdersFromTemplate(pathname: string, template: string): Pa
 /**
  * Locate every unfilled path parameter in a URL, preferring what the URL states
  * outright and falling back to the origin's routing metadata.
+ *
+ * `data` is the payload the call would send; together with the URL's query keys
+ * it supplies the field names a bare placeholder may be wearing.
  */
-export async function findPathPlaceholders(url: string, method: string): Promise<PathPlaceholder[]> {
+export async function findPathPlaceholders(
+  url: string,
+  method: string,
+  data: Record<string, unknown> = {},
+): Promise<PathPlaceholder[]> {
   let pathname: string;
   try {
     pathname = new URL(url).pathname;
@@ -175,7 +227,7 @@ export async function findPathPlaceholders(url: string, method: string): Promise
   const explicit = explicitPlaceholders(pathname);
   if (explicit.length) return explicit;
   const template = await probeMatchedPath(url, method);
-  return template ? placeholdersFromTemplate(pathname, template) : [];
+  return template ? placeholdersFromTemplate(pathname, template, requestFieldNames(url, data)) : [];
 }
 
 /**
@@ -209,6 +261,28 @@ function pickField(
   return eligible.length === 1 ? (eligible[0] ?? null) : null;
 }
 
+/**
+ * The URL's own query parameters, as binding candidates of last resort.
+ *
+ * A caller that encodes the service's input into the URL itself rather than
+ * handing it over as a payload leaves the value one place away from where it
+ * belongs: `/flights/id?ident=WN2417` holds `WN2417`, just on the query string.
+ * Offering those keys to the binder turns that into a call that works instead of
+ * one that is refused, without relaxing what counts as a placeholder.
+ *
+ * Repeated keys are skipped: a key that appears more than once is an
+ * array-valued query parameter, which is never one path segment.
+ */
+function queryCandidates(u: URL): Map<string, unknown> {
+  const counts = new Map<string, number>();
+  for (const key of u.searchParams.keys()) counts.set(key, (counts.get(key) ?? 0) + 1);
+  const out = new Map<string, unknown>();
+  for (const [key, value] of u.searchParams) {
+    if (counts.get(key) === 1) out.set(key, value);
+  }
+  return out;
+}
+
 /** Render a payload value as a single path segment. */
 function asSegment(value: unknown): string {
   const raw = typeof value === 'object' && value !== null ? JSON.stringify(value) : String(value);
@@ -222,7 +296,12 @@ function asSegment(value: unknown): string {
  * Array values become repeated query keys (`symbols=ETH&symbols=BTC`), matching
  * how x402 GET services publish their input. Non-string scalars are stringified;
  * nested objects are JSON-encoded so nothing is silently dropped. Query
- * parameters already present on the URL are preserved.
+ * parameters already present on the URL are preserved, except for one moved into
+ * the path, which would otherwise be sent twice.
+ *
+ * The payload is always preferred over the query string: it is what the caller
+ * declared as the service's input, whereas a query key is where a value merely
+ * ended up.
  */
 export function bindUrl(
   url: string,
@@ -233,18 +312,29 @@ export function bindUrl(
   const u = new URL(url);
   const segments = segmentsOf(u.pathname);
   const remaining = new Map(Object.entries(data).filter(([, v]) => v !== undefined && v !== null));
+  const fromQuery = queryCandidates(u);
   const boundKeys: string[] = [];
+  const boundQueryKeys: string[] = [];
   const unfilled: PathPlaceholder[] = [];
 
   placeholders.forEach((placeholder, i) => {
-    const key = pickField(placeholder, remaining, i === placeholders.length - 1, declaredQuery);
-    if (key === null) {
-      unfilled.push(placeholder);
+    const sole = i === placeholders.length - 1;
+    const key = pickField(placeholder, remaining, sole, declaredQuery);
+    if (key !== null) {
+      segments[placeholder.index] = asSegment(remaining.get(key));
+      remaining.delete(key);
+      boundKeys.push(key);
       return;
     }
-    segments[placeholder.index] = asSegment(remaining.get(key));
-    remaining.delete(key);
-    boundKeys.push(key);
+    const queryKey = pickField(placeholder, fromQuery, sole, declaredQuery);
+    if (queryKey !== null) {
+      segments[placeholder.index] = asSegment(fromQuery.get(queryKey));
+      fromQuery.delete(queryKey);
+      u.searchParams.delete(queryKey);
+      boundQueryKeys.push(queryKey);
+      return;
+    }
+    unfilled.push(placeholder);
   });
 
   u.pathname = `/${segments.join('/')}`;
@@ -257,7 +347,7 @@ export function bindUrl(
       u.searchParams.append(key, String(value));
     }
   }
-  return { url: u.toString(), unfilled, boundKeys };
+  return { url: u.toString(), unfilled, boundKeys, boundQueryKeys };
 }
 
 /**
@@ -271,7 +361,16 @@ export function unfilledPlaceholderMessage(
   data: Record<string, unknown>,
 ): string {
   const names = unfilled.map((p) => `\`${p.name}\``).join(', ');
-  const supplied = Object.keys(data);
+  let queryKeys: string[] = [];
+  try {
+    queryKeys = [...new URL(url).searchParams.keys()];
+  } catch {
+    queryKeys = [];
+  }
+  // Count what the URL carries as supplied too: a value put on the query string
+  // was still supplied, and reporting "none" for a URL the reader can see holds
+  // parameters makes the whole message look wrong.
+  const supplied = [...new Set([...Object.keys(data), ...queryKeys])];
   const suppliedList = supplied.length
     ? supplied.map((k) => `\`${k}\``).join(', ')
     : 'none';

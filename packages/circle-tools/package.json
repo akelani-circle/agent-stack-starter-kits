@@ -1,5 +1,5 @@
 {
-  "name": "@agent-stack-ecosystem-kits/circle-tools",
+  "name": "@agent-stack-starter-kits/circle-tools",
   "version": "0.0.0",
   "private": true,
   "description": "Framework-agnostic TypeScript wrappers around the Circle CLI (wallets, balances, service discovery, x402 payments).",

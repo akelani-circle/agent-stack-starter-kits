@@ -23,16 +23,16 @@ import {
   type SDKMessage,
   type SDKUserMessage,
 } from '@anthropic-ai/claude-agent-sdk';
-import { createChatUi, type ChatUi } from '@agent-stack-ecosystem-kits/agent-cli';
+import { createChatUi, type ChatUi } from '@agent-stack-starter-kits/agent-cli';
 import {
   ensureSession,
   formatUsdcBalance,
   walletUsdcBalance,
-} from '@agent-stack-ecosystem-kits/circle-tools';
+} from '@agent-stack-starter-kits/circle-tools';
 
+import { BOOTSTRAP_PROMPT } from '@agent-stack-starter-kits/kit-core';
 import { buildQueryOptions } from './agent';
 import { loadConfig } from './config';
-import { SETUP_SKILL_URL } from './skill';
 import { bold, colorizeJson, dim, green, heading, kitLine, red, yellow } from './theme';
 import { SPEND_TOOLS } from './tools';
 
@@ -174,13 +174,10 @@ async function main(): Promise<void> {
     });
   }
 
-  // Brief's AGENT BOOTSTRAP PROMPT, verbatim. setup.md drives the first turn.
-  const bootstrapPrompt =
-    `Run curl -sL ${SETUP_SKILL_URL}, ` +
-    'and use the returned setup instructions to set up my agent wallet.';
+  // The marketplace's own bootstrap prompt. setup.md drives the first turn.
 
   async function* inputStream(): AsyncGenerator<SDKUserMessage> {
-    yield userMessage(bootstrapPrompt);
+    yield userMessage(BOOTSTRAP_PROMPT);
     while (true) {
       const next = await nextInput();
       if (next === null) return;

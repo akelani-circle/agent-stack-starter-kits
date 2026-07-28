@@ -18,19 +18,17 @@
 
 import 'dotenv/config';
 import { createInterface } from 'node:readline/promises';
-import { createChatUi, withRetry, type ChatUi } from '@agent-stack-ecosystem-kits/agent-cli';
+import { createChatUi, withRetry, type ChatUi } from '@agent-stack-starter-kits/agent-cli';
 import {
   ensureSession,
   formatUsdcBalance,
   walletUsdcBalance,
-} from '@agent-stack-ecosystem-kits/circle-tools';
+} from '@agent-stack-starter-kits/circle-tools';
+import { BOOTSTRAP_PROMPT } from '@agent-stack-starter-kits/kit-core';
 import { onboardingWorkflow } from './workflow';
 import { buildAgent } from './agent';
 import { loadConfig } from './config';
 import { bold, kitLine } from './theme';
-
-const INITIAL_PROMPT =
-  'Run curl -sL https://agents.circle.com/skills/setup.md, and use the returned setup instructions to set up my agent wallet.';
 
 // The chat UI pins the input to the bottom while logs scroll above it. It is
 // created in main(); the module-level handle lets the fatal handler close it
@@ -123,7 +121,7 @@ async function main(): Promise<void> {
   log('continue the conversation — type "exit" to quit');
   const agent = buildAgent(config, ask);
   const messages: Array<{ role: 'user'; content: string } | { role: 'assistant'; content: string }> = [
-    { role: 'user', content: INITIAL_PROMPT },
+    { role: 'user', content: BOOTSTRAP_PROMPT },
     { role: 'assistant', content: summary },
   ];
 

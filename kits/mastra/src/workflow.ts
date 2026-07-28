@@ -18,13 +18,11 @@
 
 import { createWorkflow, createStep } from '@mastra/core/workflows';
 import { z } from 'zod';
-import { requireSession } from '@agent-stack-ecosystem-kits/circle-tools';
+import { requireSession } from '@agent-stack-starter-kits/circle-tools';
 import { buildAgent } from './agent';
 import { loadConfig } from './config';
-import { withRetry } from '@agent-stack-ecosystem-kits/agent-cli';
-
-const PROMPT =
-  'Run curl -sL https://agents.circle.com/skills/setup.md, and use the returned setup instructions to set up my agent wallet.';
+import { withRetry } from '@agent-stack-starter-kits/agent-cli';
+import { BOOTSTRAP_PROMPT } from '@agent-stack-starter-kits/kit-core';
 
 /**
  * Gate the workflow on a valid Circle agent session.
@@ -61,7 +59,7 @@ const agentStep = createStep({
     };
     const agent = buildAgent(config, noInteractiveAsk);
     const result = await withRetry(
-      (signal) => agent.generate(PROMPT, { maxSteps: 30, abortSignal: signal }),
+      (signal) => agent.generate(BOOTSTRAP_PROMPT, { maxSteps: 30, abortSignal: signal }),
       { label: 'agent' },
     );
     return { summary: result.text ?? '(no output)' };

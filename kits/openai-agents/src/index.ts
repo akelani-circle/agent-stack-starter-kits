@@ -20,12 +20,13 @@ import 'dotenv/config';
 import { createInterface } from 'node:readline/promises';
 import { run, user } from '@openai/agents';
 import type { Agent, RunResult } from '@openai/agents';
-import { createChatUi, withRetry, type ChatUi } from '@agent-stack-ecosystem-kits/agent-cli';
+import { createChatUi, withRetry, type ChatUi } from '@agent-stack-starter-kits/agent-cli';
 import {
   ensureSession,
   formatUsdcBalance,
   walletUsdcBalance,
-} from '@agent-stack-ecosystem-kits/circle-tools';
+} from '@agent-stack-starter-kits/circle-tools';
+import { BOOTSTRAP_PROMPT } from '@agent-stack-starter-kits/kit-core';
 import { buildAgent } from './agent';
 import { loadConfig } from './config';
 import { bold, kitLine } from './theme';
@@ -84,12 +85,14 @@ async function main(): Promise<void> {
   await refreshBalance();
 
   const agent = buildAgent(config, ask);
-  const prompt = 'Run curl -sL https://agents.circle.com/skills/setup.md, and use the returned setup instructions to set up my agent wallet.';
-  log(`prompt: ${prompt}`);
+  log(`prompt: ${BOOTSTRAP_PROMPT}`);
   log('running agent...');
 
   chat.setStatus('working…');
-  let result = await withRetry((signal) => run(agent, prompt, { signal }), { label: 'agent', log });
+  let result = await withRetry((signal) => run(agent, BOOTSTRAP_PROMPT, { signal }), {
+    label: 'agent',
+    log,
+  });
   result = await resolveInterruptions(result, agent);
   chat.setStatus(null);
   await refreshBalance();

@@ -18,16 +18,16 @@
 
 import { InMemoryRunner, isFinalResponse, LogLevel, setLogLevel, type Event } from '@google/adk';
 import type { Content } from '@google/genai';
-import { createChatUi, type ChatUi } from '@agent-stack-ecosystem-kits/agent-cli';
+import { createChatUi, type ChatUi } from '@agent-stack-starter-kits/agent-cli';
 import {
   ensureSession,
   formatUsdcBalance,
   walletUsdcBalance,
-} from '@agent-stack-ecosystem-kits/circle-tools';
+} from '@agent-stack-starter-kits/circle-tools';
 
+import { BOOTSTRAP_PROMPT } from '@agent-stack-starter-kits/kit-core';
 import { buildAgent, type ApprovalFn } from './agent';
 import { loadConfig } from './config';
-import { SETUP_SKILL_URL } from './skill';
 import { bold, colorizeJson, dim, green, heading, kitLine, red, yellow } from './theme';
 
 const APP_NAME = 'circle-payment-agent';
@@ -125,10 +125,7 @@ async function main(): Promise<void> {
   const agent = buildAgent(config, approve, ask);
   const runner = new InMemoryRunner({ agent, appName: APP_NAME });
 
-  // Brief's AGENT BOOTSTRAP PROMPT, verbatim. setup.md drives the first turn.
-  const bootstrapPrompt =
-    `Run curl -sL ${SETUP_SKILL_URL}, ` +
-    'and use the returned setup instructions to set up my agent wallet.';
+  // The marketplace's own bootstrap prompt. setup.md drives the first turn.
 
   // Inline auth: ensure the Circle CLI has a valid agent session before the
   // agent runs. Logs in with email + OTP if needed; a pending Terms gate is
@@ -147,7 +144,7 @@ async function main(): Promise<void> {
   log('invoking agent ...');
   // `null` means "no new turn to run" — used for the blank-line re-prompt so we
   // never re-invoke the agent without a fresh user message.
-  let input: Content | null = userMessage(bootstrapPrompt);
+  let input: Content | null = userMessage(BOOTSTRAP_PROMPT);
 
   while (true) {
     if (input) {

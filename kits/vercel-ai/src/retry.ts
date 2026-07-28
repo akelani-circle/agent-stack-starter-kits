@@ -19,7 +19,7 @@
 /**
  * Vercel-kit-specific retry policy tweak.
  *
- * The shared `withRetry` (in @agent-stack-ecosystem-kits/agent-cli) handles the
+ * The shared `withRetry` (in @agent-stack-starter-kits/agent-cli) handles the
  * generic retry + per-attempt timeout. This kit layers on one extra rule via
  * its `shouldRetry` hook: a 429 that signals an *exhausted* quota or billing
  * limit will not clear on retry, so we fast-fail it — that lets the

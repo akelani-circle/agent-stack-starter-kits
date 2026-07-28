@@ -18,74 +18,46 @@
 
 import { tool } from '@openai/agents';
 import { z } from 'zod';
+import * as circle from '@agent-stack-starter-kits/circle-tools';
 import {
-  createWallet,
-  listWallets,
-  getBalance,
-  deployWallet,
-  fundWalletFiat,
-  isWalletDeployed,
-  gatewayBalance,
-  gatewayDeposit,
-  searchServices,
-  inspectService,
-  fetchService,
-  payService,
-  getServiceAccepts,
-  chooseChain,
-  preferredChain,
-  sellerRequiresGateway,
-  chainLabel,
-  ensureSession,
-  logout,
-  runCircle,
-  type Chain,
-} from '@agent-stack-ecosystem-kits/circle-tools';
-import {
+  ensureDeployed,
   fetchSetupSkill,
   fetchSubSkill,
+  parsePayload,
+  preview,
+  selectDepositMethod,
+  selectGatewayChain,
+  selectPayChain,
+  CHAIN_VALUES,
+  HTTP_METHOD_VALUES,
+  PARAM_DESCRIPTIONS,
   SETUP_SKILL_URL,
-  SUB_SKILLS,
   SUB_SKILL_NAMES,
+  TOOL_DESCRIPTIONS,
   type SubSkillName,
-} from './skill';
+} from '@agent-stack-starter-kits/kit-core';
 import { bold, toolLine } from './theme';
 
-const CHAIN = process.env['CIRCLE_CHAIN'] ?? 'BASE';
-const chainEnum = z.enum(['BASE', 'POLYGON']);
+const subSkillEnum = z.enum(SUB_SKILL_NAMES as [SubSkillName, ...SubSkillName[]]);
+const chainEnum = z.enum(CHAIN_VALUES);
+const methodEnum = z.enum(HTTP_METHOD_VALUES);
 
 function log(line: string): void {
   console.log(toolLine(line));
 }
 
-function preview(value: string, max = 120): string {
-  const oneLine = value.replace(/\s+/g, ' ').trim();
-  return oneLine.length > max ? `${oneLine.slice(0, max)}…` : oneLine;
-}
-
-// Cap skill markdown returned to the model. These files can exceed 26 KB;
-// the actionable steps are always near the top, and oversized responses
-// balloon the conversation history across turns causing TPM 429s.
-const MAX_SKILL_CHARS = 8_000;
-
-function capSkill(body: string, name: string): string {
-  if (body.length <= MAX_SKILL_CHARS) return body;
-  return (
-    body.slice(0, MAX_SKILL_CHARS) +
-    `\n\n[...${body.length - MAX_SKILL_CHARS} chars omitted — re-fetch ${name} if you need the rest]`
-  );
-}
+// ── Skill fetchers ──────────────────────────────────────────────────────────
 
 export const fetchSetupSkillTool = tool({
   name: 'fetch_setup_skill',
-  description: `Fetch the Circle Agent setup skill from ${SETUP_SKILL_URL}. Returns the raw markdown setup instructions to follow.`,
+  description: TOOL_DESCRIPTIONS.fetch_setup_skill,
   parameters: z.object({}),
   execute: async () => {
     log(`fetch_setup_skill → ${SETUP_SKILL_URL}`);
     try {
       const body = await fetchSetupSkill();
       log(`fetch_setup_skill ← ${body.length} bytes`);
-      return capSkill(body, 'fetch_setup_skill');
+      return body;
     } catch (e) {
       log(`fetch_setup_skill ✗ ${(e as Error).message}`);
       throw e;
@@ -93,21 +65,18 @@ export const fetchSetupSkillTool = tool({
   },
 });
 
-const subSkillEnum = z.enum(SUB_SKILL_NAMES as [SubSkillName, ...SubSkillName[]]);
-const subSkillCatalog = SUB_SKILL_NAMES.map((n) => `- ${n} → ${SUB_SKILLS[n]}`).join('\n');
-
 export const fetchSubSkillTool = tool({
   name: 'fetch_sub_skill',
-  description: `Fetch a Circle Agent sub-skill markdown by name. Call this when setup.md (or a tool error) references one of these sub-skills:\n${subSkillCatalog}`,
+  description: TOOL_DESCRIPTIONS.fetch_sub_skill,
   parameters: z.object({
-    name: subSkillEnum.describe('Sub-skill name, without the .md extension.'),
+    name: subSkillEnum.describe(PARAM_DESCRIPTIONS.subSkillName),
   }),
   execute: async ({ name }) => {
     log(`fetch_sub_skill name=${name}`);
     try {
       const body = await fetchSubSkill(name);
       log(`fetch_sub_skill ← ${body.length} bytes`);
-      return capSkill(body, `fetch_sub_skill(${name})`);
+      return body;
     } catch (e) {
       log(`fetch_sub_skill ✗ ${(e as Error).message}`);
       throw e;
@@ -115,15 +84,17 @@ export const fetchSubSkillTool = tool({
   },
 });
 
+// ── Wallet tools ────────────────────────────────────────────────────────────
+
 export const circleCreateWallet = tool({
   name: 'circle_create_wallet',
-  description: 'Create a new agent-controlled wallet on BASE via the Circle CLI.',
+  description: TOOL_DESCRIPTIONS.circle_create_wallet,
   parameters: z.object({}),
   execute: async () => {
-    log(`circle_create_wallet`);
+    log('circle_create_wallet');
     try {
-      const result = await createWallet();
-      log(`circle_create_wallet ← ${(result as { address: string }).address}`);
+      const result = await circle.createWallet();
+      log(`circle_create_wallet ← ${result.address}`);
       return JSON.stringify(result);
     } catch (e) {
       log(`circle_create_wallet ✗ ${(e as Error).message}`);
@@ -134,13 +105,13 @@ export const circleCreateWallet = tool({
 
 export const circleListWallets = tool({
   name: 'circle_list_wallets',
-  description: 'List existing agent wallets on BASE.',
+  description: TOOL_DESCRIPTIONS.circle_list_wallets,
   parameters: z.object({}),
   execute: async () => {
-    log(`circle_list_wallets`);
+    log('circle_list_wallets');
     try {
-      const result = await listWallets();
-      log(`circle_list_wallets ← ${(result as unknown[]).length} wallet(s)`);
+      const result = await circle.listWallets();
+      log(`circle_list_wallets ← ${result.length} wallet(s)`);
       return JSON.stringify(result);
     } catch (e) {
       log(`circle_list_wallets ✗ ${(e as Error).message}`);
@@ -151,18 +122,17 @@ export const circleListWallets = tool({
 
 export const circleGetBalance = tool({
   name: 'circle_get_balance',
-  description: 'Check USDC and token balances for an agent wallet. Defaults to Base; pass chain "POLYGON" to read the Polygon balance.',
+  description: TOOL_DESCRIPTIONS.circle_get_balance,
   parameters: z.object({
-    address: z.string().describe('The wallet address to check'),
-    chain: chainEnum.optional().describe('Chain to read the balance on. Defaults to BASE.'),
+    address: z.string().describe(PARAM_DESCRIPTIONS.address),
+    chain: chainEnum.optional().describe(PARAM_DESCRIPTIONS.chain),
   }),
   execute: async ({ address, chain }) => {
-    log(`circle_get_balance address=${address} chain=${chain ?? 'BASE'}`);
+    log(`circle_get_balance address=${address} chain=${chain ?? circle.DEFAULT_CHAIN}`);
     try {
-      const result = await getBalance({ address, chain: chain as Chain | undefined });
-      const tokens = (result as { tokens: Array<{ symbol?: string; amount?: string }> }).tokens;
-      const usdc = tokens.find((t) => t.symbol?.toUpperCase() === 'USDC');
-      log(`circle_get_balance ← USDC=${usdc?.amount ?? '0'} (${tokens.length} token(s))`);
+      const result = await circle.getBalance({ address, chain: chain ?? undefined });
+      const usdc = result.tokens.find((t) => t.symbol?.toUpperCase() === 'USDC');
+      log(`circle_get_balance ← USDC=${usdc?.amount ?? '0'} (${result.tokens.length} token(s))`);
       return JSON.stringify(result);
     } catch (e) {
       log(`circle_get_balance ✗ ${(e as Error).message}`);
@@ -173,15 +143,19 @@ export const circleGetBalance = tool({
 
 export const circleWalletFund = tool({
   name: 'circle_wallet_fund',
-  description: 'Fund an agent wallet with testnet USDC using the Circle faucet (BASE only).',
+  description: TOOL_DESCRIPTIONS.circle_wallet_fund,
   parameters: z.object({
-    address: z.string().describe('The wallet address to fund'),
+    address: z.string().describe(PARAM_DESCRIPTIONS.address),
+    method: z
+      .enum(['crypto', 'fiat'])
+      .default('crypto')
+      .describe('"crypto" draws from the testnet faucet; "fiat" runs the test card flow.'),
   }),
-  execute: async ({ address }) => {
-    log(`circle_wallet_fund address=${address}`);
+  execute: async ({ address, method }) => {
+    log(`circle_wallet_fund address=${address} method=${method}`);
     try {
-      const out = runCircle(['wallet', 'fund', '--address', address, '--chain', 'BASE', '--output', 'json']);
-      log(`circle_wallet_fund ← done`);
+      const out = await circle.fundWallet({ address, method: method ?? 'crypto' });
+      log('circle_wallet_fund ← done');
       return out;
     } catch (e) {
       log(`circle_wallet_fund ✗ ${(e as Error).message}`);
@@ -192,28 +166,23 @@ export const circleWalletFund = tool({
 
 export const circleDeployWallet = tool({
   name: 'circle_deploy_wallet',
-  description:
-    `Deploy an agent wallet's Smart Contract Account on-chain via a one-time, ` +
-    'zero-value self-transfer. A freshly created wallet is counterfactual: it can receive ' +
-    'USDC but cannot sign x402 payments until deployed. Deployment is per-chain, so deploy on ' +
-    'the chain the payment will settle on (defaults to Base; pass chain "POLYGON" for a ' +
-    'Polygon-only service). Idempotent and gas-abstracted (spends nothing), and safe to call ' +
-    'on an already-deployed wallet, where it sends no transaction. Call this before ' +
-    'circle_pay_service for any wallet that has never sent a transaction on that chain.',
+  description: TOOL_DESCRIPTIONS.circle_deploy_wallet,
   parameters: z.object({
-    address: z.string().describe('Agent wallet address to deploy (0x...).'),
-    chain: chainEnum.optional().describe('Chain to deploy the SCA on. Defaults to BASE.'),
+    address: z.string().describe(PARAM_DESCRIPTIONS.address),
+    chain: chainEnum.optional().describe(PARAM_DESCRIPTIONS.chain),
   }),
   execute: async ({ address, chain }) => {
-    log(`circle_deploy_wallet address=${address} chain=${chain ?? 'BASE'}`);
+    log(`circle_deploy_wallet address=${address} chain=${chain ?? circle.DEFAULT_CHAIN}`);
     try {
-      const result = await deployWallet({ address, chain: chain as Chain | undefined });
+      const result = await circle.deployWallet({ address, chain: chain ?? undefined });
       if (result.alreadyDeployed) {
-        log(`circle_deploy_wallet ← already deployed`);
+        log('circle_deploy_wallet ← already deployed');
       } else if (result.deployed) {
         log(`circle_deploy_wallet ← deployed tx=${result.txId ?? 'n/a'}`);
       } else {
-        log(`circle_deploy_wallet ← submitted, on-chain confirmation pending tx=${result.txId ?? 'n/a'}`);
+        log(
+          `circle_deploy_wallet ← submitted, on-chain confirmation pending tx=${result.txId ?? 'n/a'}`,
+        );
       }
       return JSON.stringify(result);
     } catch (e) {
@@ -225,27 +194,30 @@ export const circleDeployWallet = tool({
 
 export const fundFiatTool = tool({
   name: 'circle_fund_fiat',
-  description:
-    'Fund a wallet with a fiat (card / bank) purchase via the Transak on-ramp. ' +
-    'Returns a Transak `url` to give the user as a link to open: they complete the ' +
-    'purchase there and the tokens deposit to the wallet on the chosen chain (defaults ' +
-    'to Base). This tool only generates the URL and moves no USDC itself, so it needs ' +
-    'no approval; the user pays inside the on-ramp. Use this when the user wants to buy ' +
-    'USDC with money they do not yet hold in crypto. After the user reports the purchase ' +
-    'complete, confirm with circle_get_balance. Mainnet only.',
+  description: TOOL_DESCRIPTIONS.circle_fund_fiat,
   parameters: z.object({
-    address: z.string().describe('Destination agent wallet address (0x...).'),
-    amount: z.number().positive().describe('Amount of token to buy, in human units (e.g. 10 for $10 of USDC).'),
-    chain: chainEnum.optional().describe('Chain the funds deposit on. Defaults to BASE.'),
+    address: z.string().describe(PARAM_DESCRIPTIONS.address),
+    amount: z.number().positive().describe(PARAM_DESCRIPTIONS.fiatAmount),
+    chain: chainEnum.optional().describe(PARAM_DESCRIPTIONS.chain),
     token: z
       .enum(['usdc', 'eurc', 'eth', 'native'])
       .optional()
       .describe('Token to buy. Defaults to usdc.'),
   }),
   execute: async ({ address, amount, chain, token }) => {
-    log(`circle_fund_fiat address=${address} amount=${amount} chain=${chain ?? 'BASE'} token=${token ?? 'usdc'}`);
+    log(
+      `circle_fund_fiat address=${address} amount=${amount} chain=${chain ?? circle.DEFAULT_CHAIN} token=${token ?? 'usdc'}`,
+    );
     try {
-      const result = await fundWalletFiat({ address, amount, chain, token, open: true });
+      // Local interactive demo: open the Transak page in the user's browser so
+      // they can complete the purchase. Best-effort, a no-op on headless.
+      const result = await circle.fundWalletFiat({
+        address,
+        amount,
+        chain: chain ?? undefined,
+        token: token ?? undefined,
+        open: true,
+      });
       log(`circle_fund_fiat ← ${preview(result.url, 80)}`);
       return JSON.stringify(result);
     } catch (e) {
@@ -255,23 +227,20 @@ export const fundFiatTool = tool({
   },
 });
 
+// ── Service discovery tools ─────────────────────────────────────────────────
+
 export const fetchServiceTool = tool({
   name: 'fetch_service',
-  description:
-    'GET a service endpoint with no payment: the free-tier path. Try this FIRST ' +
-    'for any endpoint a user names. A free endpoint (e.g. a catalog or index) ' +
-    'returns its data directly with HTTP 200; use that body as the answer. If the ' +
-    'result has paymentRequired=true (HTTP 402), the endpoint is paid: call ' +
-    'circle_inspect_service then circle_pay_service instead.',
+  description: TOOL_DESCRIPTIONS.fetch_service,
   parameters: z.object({
-    url: z.string().describe('The service endpoint URL to GET.'),
+    url: z.string().describe(PARAM_DESCRIPTIONS.serviceUrl),
   }),
   execute: async ({ url }) => {
     log(`fetch_service url=${url}`);
     try {
-      const result = await fetchService({ url });
+      const result = await circle.fetchService({ url });
       if (result.paymentRequired) {
-        log(`fetch_service ← HTTP 402, payment required`);
+        log('fetch_service ← HTTP 402, payment required');
       } else {
         log(`fetch_service ← HTTP ${result.status} ${result.body.length} bytes`);
       }
@@ -285,15 +254,15 @@ export const fetchServiceTool = tool({
 
 export const circleSearchServices = tool({
   name: 'circle_search_services',
-  description: 'Discover x402-compatible services on the Circle Agent Marketplace.',
+  description: TOOL_DESCRIPTIONS.circle_search_services,
   parameters: z.object({
-    keyword: z.string().describe('Search keyword for service discovery'),
+    keyword: z.string().describe('Search keyword.'),
   }),
   execute: async ({ keyword }) => {
     log(`circle_search_services keyword="${keyword}"`);
     try {
-      const result = await searchServices({ keyword });
-      log(`circle_search_services ← ${(result as unknown[]).length} hit(s)`);
+      const result = await circle.searchServices({ keyword });
+      log(`circle_search_services ← ${result.length} hit(s)`);
       return JSON.stringify(result);
     } catch (e) {
       log(`circle_search_services ✗ ${(e as Error).message}`);
@@ -304,17 +273,14 @@ export const circleSearchServices = tool({
 
 export const circleInspectService = tool({
   name: 'circle_inspect_service',
-  description:
-    'Inspect an x402 service. Returns pricing, input schema, HTTP method, and health. Always ' +
-    'call this before circle_pay_service so both the payload matches the schema and the ' +
-    "`method` is passed through (a GET service's input goes in the query string, not a body).",
+  description: TOOL_DESCRIPTIONS.circle_inspect_service,
   parameters: z.object({
-    url: z.string().describe('The service URL to inspect'),
+    url: z.string().describe(PARAM_DESCRIPTIONS.serviceUrl),
   }),
   execute: async ({ url }) => {
     log(`circle_inspect_service url=${url}`);
     try {
-      const result = await inspectService({ url });
+      const result = await circle.inspectService({ url });
       log(`circle_inspect_service ← ${preview(JSON.stringify(result))}`);
       return JSON.stringify(result);
     } catch (e) {
@@ -326,18 +292,15 @@ export const circleInspectService = tool({
 
 export const circleGetGatewayBalance = tool({
   name: 'circle_get_gateway_balance',
-  description:
-    "Check the wallet's Circle Gateway balance: the off-chain batched-payment pool, " +
-    'separate from the on-chain wallet balance reported by circle_get_balance. Defaults to ' +
-    'Base; pass chain "POLYGON" to read the Polygon Gateway balance.',
+  description: TOOL_DESCRIPTIONS.circle_get_gateway_balance,
   parameters: z.object({
-    address: z.string().describe('EVM wallet address (0x...).'),
-    chain: chainEnum.optional().describe('Chain to read the Gateway balance on. Defaults to BASE.'),
+    address: z.string().describe(PARAM_DESCRIPTIONS.address),
+    chain: chainEnum.optional().describe(PARAM_DESCRIPTIONS.chain),
   }),
   execute: async ({ address, chain }) => {
-    log(`circle_get_gateway_balance address=${address} chain=${chain ?? 'BASE'}`);
+    log(`circle_get_gateway_balance address=${address} chain=${chain ?? circle.DEFAULT_CHAIN}`);
     try {
-      const result = await gatewayBalance({ address, chain: chain as Chain | undefined });
+      const result = await circle.gatewayBalance({ address, chain: chain ?? undefined });
       log(`circle_get_gateway_balance ← total=${result.total} USDC`);
       return JSON.stringify(result);
     } catch (e) {
@@ -347,103 +310,53 @@ export const circleGetGatewayBalance = tool({
   },
 });
 
+// ── Spend tools ─────────────────────────────────────────────────────────────
+//
+// `needsApproval: true` is the OpenAI Agents SDK's native human-in-the-loop
+// hook: the run interrupts before the tool executes and the entry point drives
+// the y/N prompt, so unlike the Vercel AI kit no approval logic lives in here.
+//
+// These throw rather than return errors: the SDK surfaces a thrown tool error
+// back to the model as the tool result, so the model can still recover.
+
 export const circlePayService = tool({
   name: 'circle_pay_service',
-  description:
-    'Pay for an x402 service with a Circle USDC payment. The kit reads the ' +
-    "service's published payment options and pays under the right scheme automatically: " +
-    'vanilla x402, or Circle Gateway when the seller requires it. It also picks the chain: ' +
-    'Base when the seller offers it, otherwise Polygon (the kit supports Base and Polygon). ' +
-    'If the seller requires Gateway and the wallet has no Gateway balance, this fails with an ' +
-    'actionable message: call circle_gateway_deposit for the same URL, then retry circle_pay_service. ' +
-    'Pass the `method` from circle_inspect_service: a GET service reads dataJson as URL ' +
-    'query parameters, a POST/PUT/PATCH service reads it as a JSON body. Sending the wrong ' +
-    'one makes the server see no input and still spends USDC, so always copy the inspected method.',
+  description: TOOL_DESCRIPTIONS.circle_pay_service,
   needsApproval: true,
   parameters: z.object({
-    url: z.string().describe('The service URL to pay'),
-    address: z.string().describe('The wallet address to pay from'),
-    method: z
-      .enum(['GET', 'POST', 'PUT', 'DELETE', 'PATCH'])
-      .optional()
-      .describe(
-        "HTTP method the service expects, copied from circle_inspect_service's `method` " +
-          'field. Defaults to GET if omitted.',
-      ),
-    // A JSON string, not an object: @openai/agents runs tools in strict mode,
-    // which forces every object schema to additionalProperties:false. An open
-    // payload object would collapse to a closed empty object the model can never
-    // fill, so it would always send {} and the server would reject the paid call.
-    dataJson: z
-      .string()
-      .describe(
-        'JSON-encoded payload object matching the service input schema, e.g. \'{"city":"NYC"}\'. ' +
-          'For a GET service these become query parameters (arrays repeat the key, e.g. ' +
-          'symbols=ETH&symbols=BTC); for POST/PUT/PATCH they become the JSON request body.',
-      ),
+    url: z.string().describe(PARAM_DESCRIPTIONS.serviceUrl),
+    address: z.string().describe(PARAM_DESCRIPTIONS.address),
+    method: methodEnum.optional().describe(PARAM_DESCRIPTIONS.httpMethod),
+    dataJson: z.string().describe(PARAM_DESCRIPTIONS.dataJson),
   }),
   execute: async ({ url, address, method, dataJson }) => {
     const httpMethod = (method ?? 'GET').toUpperCase();
-    log(`circle_pay_service url=${url} from=${address} method=${httpMethod} data=${preview(dataJson, 80)}`);
+    log(
+      `circle_pay_service url=${url} from=${address} method=${httpMethod} data=${preview(dataJson, 80)}`,
+    );
 
-    let data: Record<string, unknown>;
-    try {
-      data = JSON.parse(dataJson) as Record<string, unknown>;
-    } catch (e) {
-      log(`circle_pay_service ✗ invalid dataJson`);
-      throw new Error(
-        `dataJson is not valid JSON: ${(e as Error).message}. Re-check the service schema from circle_inspect_service.`,
-      );
+    const payload = parsePayload(dataJson);
+    if (!payload.ok) {
+      log('circle_pay_service ✗ invalid dataJson');
+      throw new Error(payload.message);
     }
 
-    // Confirm the seller publishes a payment option on a chain the kit can pay,
-    // and pick which chain to use. Base wins when the wallet can afford the call
-    // there; Polygon is used when it is the only chain offered or the only one
-    // holding enough USDC.
-    let chain: Chain;
-    try {
-      const accepts = await getServiceAccepts(url, httpMethod);
-      const picked = await chooseChain(accepts, address);
-      if (!picked) {
-        const offered = accepts.unsupportedNetworks.join(', ') || 'none';
-        log(`circle_pay_service ✗ no supported pay option (seller offers: ${offered})`);
-        throw new Error(
-          `This service offers no payment option on a chain the kit supports (Base or Polygon). ` +
-            `Seller networks: ${offered}.`,
-        );
-      }
-      chain = picked;
-    } catch (e) {
-      log(`circle_pay_service ✗ ${(e as Error).message}`);
-      throw e;
-    }
+    const chain = await selectPayChain(url, httpMethod, address, log);
+    if (!chain.ok) throw new Error(chain.message);
 
-    // Pre-flight: a counterfactual (undeployed) SCA cannot sign an x402 payment.
-    // Deployment is per-chain, so check the chain being paid.
-    try {
-      if (!(await isWalletDeployed({ address, chain }))) {
-        log(`circle_pay_service ✗ wallet not deployed on ${chain}`);
-        throw new Error(
-          `Wallet ${address} is not deployed on-chain on ${chainLabel(chain)} yet, so it ` +
-            `cannot sign x402 payments there. Call circle_deploy_wallet with this address and ` +
-            `chain "${chain}" first, then retry circle_pay_service.`,
-        );
-      }
-    } catch (e) {
-      if ((e as Error).message.includes('circle_deploy_wallet')) {
-        log(`circle_pay_service ✗ ${(e as Error).message}`);
-        throw e;
-      }
-      // Detection is best-effort: a flaky RPC must not block a real payment.
-      log(`circle_pay_service: deployment check skipped (${(e as Error).message})`);
-    }
+    const deployed = await ensureDeployed(address, chain.chain, log);
+    if (!deployed.ok) throw new Error(deployed.message);
 
     try {
-      const result = await payService({ url, address, data, method: httpMethod, chain });
-      const tx = (result as { txHash?: string }).txHash
-        ? ` txHash=${(result as { txHash?: string }).txHash}`
-        : '';
-      log(`circle_pay_service ← paid on ${chainLabel(chain)}${tx}`);
+      const result = await circle.payService({
+        url,
+        address,
+        data: payload.data,
+        method: httpMethod,
+        chain: chain.chain,
+      });
+      const tx = result.txHash ? ` txHash=${result.txHash}` : '';
+      log(`circle_pay_service ← paid on ${circle.chainLabel(chain.chain)}${tx}`);
       return JSON.stringify(result);
     } catch (e) {
       log(`circle_pay_service ✗ ${(e as Error).message}`);
@@ -454,67 +367,31 @@ export const circlePayService = tool({
 
 export const circleGatewayDeposit = tool({
   name: 'circle_gateway_deposit',
-  description:
-    "Fund the wallet's Circle Gateway balance so it can pay a seller that requires " +
-    'Gateway (batched) x402 payments. Pass the service URL; the kit confirms the seller ' +
-    'requires Gateway and picks the chain (Base preferred, else Polygon), then deposits on ' +
-    'that chain. Method auto-selected: Polygon sellers use the fast eco path (~30s, no gas on ' +
-    "source, USDC sourced from the wallet's Base USDC balance and landed in the Polygon " +
-    'Gateway pool); Base sellers use direct (13-19 min, consumes gas on Base). Spends USDC ' +
-    '(the deposit amount plus fee) and pauses for human approval. After it succeeds, retry ' +
-    'circle_pay_service for the same URL.',
+  description: TOOL_DESCRIPTIONS.circle_gateway_deposit,
   needsApproval: true,
   parameters: z.object({
-    url: z.string().describe('The service URL this deposit is for.'),
-    address: z.string().describe('Agent wallet address to deposit from (0x...).'),
-    method: z
-      .enum(['GET', 'POST', 'PUT', 'DELETE', 'PATCH'])
-      .optional()
-      .describe(
-        "HTTP method the service expects, copied from circle_inspect_service's `method` " +
-          "field. Needed so the seller's Gateway requirement is read with the right " +
-          'method. Defaults to GET.',
-      ),
-    amount: z
-      .number()
-      .positive()
-      .describe(
-        'USDC amount to move into Gateway. Size it to cover the expected paid calls ' +
-          'plus the ~$0.03 fee; a Gateway minimum deposit may apply.',
-      ),
+    url: z.string().describe(PARAM_DESCRIPTIONS.serviceUrl),
+    address: z.string().describe(PARAM_DESCRIPTIONS.address),
+    method: methodEnum.optional().describe(PARAM_DESCRIPTIONS.httpMethod),
+    amount: z.number().positive().describe(PARAM_DESCRIPTIONS.depositAmount),
   }),
   execute: async ({ url, address, method, amount }) => {
     const httpMethod = (method ?? 'GET').toUpperCase();
     log(`circle_gateway_deposit url=${url} address=${address} amount=${amount}`);
-    // Only deposit when the seller actually requires a Gateway payment; for a
-    // vanilla-x402 seller a deposit would not help. Deposit on the chain the
-    // payment will settle on (Base preferred, else Polygon).
-    let chain: Chain;
-    try {
-      const accepts = await getServiceAccepts(url, httpMethod);
-      const picked = preferredChain(accepts);
-      if (!picked || !sellerRequiresGateway(accepts, picked)) {
-        log(`circle_gateway_deposit ✗ seller offers no Gateway option on a supported chain`);
-        throw new Error(
-          `${url} does not require a Circle Gateway payment on a chain the kit supports, so a ` +
-            'Gateway deposit would not help. Pay it with circle_pay_service directly.',
-        );
-      }
-      chain = picked;
-    } catch (e) {
-      log(`circle_gateway_deposit ✗ ${(e as Error).message}`);
-      throw e;
-    }
 
-    // Pick deposit method: Polygon Gateway sellers get the fast (~30s) eco
-    // method, which sources Base USDC and lands on Polygon. Base Gateway
-    // sellers must use direct (13-19 min) because eco's destination is
-    // hardcoded to Polygon by the CLI.
-    const depositMethod = chain === 'POLYGON' ? 'eco' : 'direct';
+    const chain = await selectGatewayChain(url, httpMethod, log);
+    if (!chain.ok) throw new Error(chain.message);
+
+    const depositMethod = selectDepositMethod(chain.chain);
     try {
-      const result = await gatewayDeposit({ address, amount, chain, method: depositMethod });
+      const result = await circle.gatewayDeposit({
+        address,
+        amount,
+        chain: chain.chain,
+        method: depositMethod,
+      });
       log(
-        `circle_gateway_deposit ← ${result.amount} USDC on ${chainLabel(chain)} via ${depositMethod} tx=${result.txId ?? 'n/a'}`,
+        `circle_gateway_deposit ← ${result.amount} USDC on ${circle.chainLabel(chain.chain)} via ${depositMethod} tx=${result.txId ?? 'n/a'}`,
       );
       return JSON.stringify(result);
     } catch (e) {
@@ -524,70 +401,19 @@ export const circleGatewayDeposit = tool({
   },
 });
 
-export const callFreeService = tool({
-  name: 'call_free_service',
-  description:
-    'Call a free (no-payment) service endpoint via HTTP with custom parameters. ' +
-    'For simple GET probing, prefer fetch_service which also detects payment requirements. ' +
-    'Use this for free endpoints that need POST or custom query parameters.',
-  parameters: z.object({
-    url: z.string().describe('The endpoint URL to call'),
-    method: z.enum(['GET', 'POST']).default('GET').describe('HTTP method'),
-    params: z
-      .string()
-      .nullable()
-      .describe('JSON-encoded query params (GET) or request body (POST), or null if none'),
-  }),
-  execute: async ({ url, method = 'GET', params }) => {
-    log(`call_free_service url=${url} method=${method}`);
-    try {
-      let finalUrl = url;
-      const init: RequestInit = { method };
-      const parsed: Record<string, unknown> | null = params ? (JSON.parse(params) as Record<string, unknown>) : null;
-
-      if (method === 'GET' && parsed) {
-        const qs = new URLSearchParams(
-          Object.entries(parsed).map(([k, v]) => [k, String(v)] as [string, string]),
-        ).toString();
-        finalUrl = `${url}?${qs}`;
-      } else if (method === 'POST' && parsed) {
-        init.headers = { 'Content-Type': 'application/json' };
-        init.body = JSON.stringify(parsed);
-      }
-
-      const res = await fetch(finalUrl, init);
-      const text = await res.text();
-      if (!res.ok) throw new Error(`HTTP ${res.status}: ${text}`);
-      log(`call_free_service ← HTTP ${res.status} ${text.length} bytes`);
-      return text;
-    } catch (e) {
-      log(`call_free_service ✗ ${(e as Error).message}`);
-      throw e;
-    }
-  },
-});
+// ── Auth tools ──────────────────────────────────────────────────────────────
 
 export function buildAuthTools(ask: (q: string) => Promise<string>) {
   const loginTool = tool({
     name: 'circle_login',
-    description:
-      'Log in to the Circle agent wallet via email + OTP, or confirm an existing session. ' +
-      'Use this whenever the user wants to log in or log back in, or when another tool fails ' +
-      'because the session is missing or expired. The kit prompts the user in the terminal ' +
-      'for their email and the OTP from their inbox (never stored); it does not accept the ' +
-      'Terms of Use on their behalf. If a session is already valid this is a no-op that ' +
-      'reports so. After it succeeds, retry whatever the user originally asked for.',
+    description: TOOL_DESCRIPTIONS.circle_login,
     parameters: z.object({}),
     execute: async () => {
       log('circle_login');
       try {
-        const result = await ensureSession({ ask, log, bold });
-        const message =
-          result.status === 'already-valid'
-            ? 'Already logged in; the Circle session is valid.'
-            : 'Logged in. The Circle session is now valid.';
+        const result = await circle.ensureSession({ ask, log, bold });
         log(`circle_login ← ${result.status}`);
-        return JSON.stringify({ status: result.status, message });
+        return JSON.stringify({ status: result.status });
       } catch (e) {
         log(`circle_login ✗ ${(e as Error).message}`);
         throw e;
@@ -597,17 +423,13 @@ export function buildAuthTools(ask: (q: string) => Promise<string>) {
 
   const logoutTool = tool({
     name: 'circle_logout',
-    description:
-      'Log out of the Circle agent wallet and clear the stored credentials. Use this when the ' +
-      'user wants to log out or switch accounts. Safe to call when no session exists (reports ' +
-      'that nothing was logged out). After this, the user must circle_login again before any ' +
-      'wallet or payment tool will work.',
+    description: TOOL_DESCRIPTIONS.circle_logout,
     parameters: z.object({}),
     execute: async () => {
       log('circle_logout');
       try {
-        logout(log);
-        return JSON.stringify({ message: 'Logged out; Circle credentials cleared.' });
+        circle.logout(log);
+        return JSON.stringify({ loggedOut: true });
       } catch (e) {
         log(`circle_logout ✗ ${(e as Error).message}`);
         throw e;

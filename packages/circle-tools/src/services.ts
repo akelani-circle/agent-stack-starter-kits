@@ -687,7 +687,10 @@ export async function payService(input: PayServiceInput): Promise<PaymentResult>
   // on the query string it is ignored and the server reads the placeholder itself
   // as the value, which is a paid failure every time.
   const sendsBody = BODY_METHODS.has(method);
-  const placeholders = await findPathPlaceholders(input.url, method);
+  // The payload is handed to the probe as well: a placeholder the caller renamed
+  // after one of its own fields (`/flights/ident` under the route `[id]`) reads
+  // as a filled segment without it, and would be paid for.
+  const placeholders = await findPathPlaceholders(input.url, method, input.data);
   const declaredQuery = declaredQueryParams(inspection?.schema);
   // A body method still needs its path bound, but its payload belongs in the body,
   // so only path-eligible fields are offered to the binder.

@@ -1,6 +1,6 @@
 # Circle Agent Stack Starter Kits
 
-Open-source starter kits for developers building agent harneses that need access to wallets and USDC to autonomously pay for x402 and Nanopayment-enabled services via the [Circle Agent Stack](https://developers.circle.com/agent-stack). Each kit wires the Agent Stack — agent wallets, nanopayments, and the [Circle Agent Marketplace](https://agents.circle.com/services) — into a different popular AI agent framework and drops you into an interactive terminal chat with the agent.
+Open-source starter kits for developers building agent harnesses that need access to wallets and USDC to autonomously pay for x402 and Nanopayment-enabled services via the [Circle Agent Stack](https://developers.circle.com/agent-stack). Each kit wires the Agent Stack — agent wallets, nanopayments, and the [Circle Agent Marketplace](https://agents.circle.com/services) — into a different popular AI agent framework and drops you into an interactive terminal chat with the agent.
 
 <img width="1200" height="600" alt="Claude Agent Terminal" src="demo.gif" />
 
@@ -17,13 +17,16 @@ Open-source starter kits for developers building agent harneses that need access
 
 ## Shared packages
 
+Everything a kit does not have to write for itself lives in one of three workspace packages, so the kits differ only where their frameworks genuinely differ:
+
 - [`packages/circle-tools`](./packages/circle-tools): framework-agnostic wrappers around the Circle CLI (wallets, balances, service discovery, x402 payments).
-- [`packages/agent-cli`](./packages/agent-cli): reusable Ink-based terminal chat UI (scrolling log + pinned bottom input) shared by the kits.
+- [`packages/kit-core`](./packages/kit-core): the shared kit layer — marketplace skill fetching and the bootstrap prompt, the single-sourced tool and parameter descriptions, the payment preflight/approval helpers, and the terminal theme.
+- [`packages/agent-cli`](./packages/agent-cli): reusable Ink-based terminal chat UI (scrolling log + pinned bottom input) and the retry/timeout wrapper shared by the kits.
 
 ## Repository layout
 
 ```
-agent-stack-ecosystem-kits/
+agent-stack-starter-kits/
 ├── kits/
 │   ├── claude-agent-sdk/
 │   ├── google-adk/
@@ -32,9 +35,12 @@ agent-stack-ecosystem-kits/
 │   ├── openai-agents/
 │   └── vercel-ai/
 └── packages/
-    ├── circle-tools/         # shared, framework-agnostic
-    └── agent-cli/            # shared terminal chat UI
+    ├── circle-tools/         # Circle CLI wrappers
+    ├── kit-core/             # shared skill / tool copy / preflight / theme
+    └── agent-cli/            # shared terminal chat UI + retry
 ```
+
+Each kit is deliberately thin: a `config.ts`, an `agent.ts` wiring its framework's agent and approval hook, a `tools.ts` adapting the shared descriptions and preflight helpers to that framework's tool API, a `theme.ts` that only names the kit's log tag, and an `index.ts` driving the chat loop.
 
 ## Prerequisites
 

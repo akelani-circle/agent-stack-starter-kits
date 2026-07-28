@@ -32,6 +32,7 @@ import {
   fetchService,
   payService,
   getServiceAccepts,
+  chooseChain,
   preferredChain,
   sellerRequiresGateway,
   chainLabel,
@@ -396,12 +397,13 @@ export const circlePayService = tool({
     }
 
     // Confirm the seller publishes a payment option on a chain the kit can pay,
-    // and pick which chain to use. Base is preferred; Polygon is the fallback
-    // when the seller offers no Base option.
+    // and pick which chain to use. Base wins when the wallet can afford the call
+    // there; Polygon is used when it is the only chain offered or the only one
+    // holding enough USDC.
     let chain: Chain;
     try {
       const accepts = await getServiceAccepts(url, httpMethod);
-      const picked = preferredChain(accepts);
+      const picked = await chooseChain(accepts, address);
       if (!picked) {
         const offered = accepts.unsupportedNetworks.join(', ') || 'none';
         log(`circle_pay_service ✗ no supported pay option (seller offers: ${offered})`);

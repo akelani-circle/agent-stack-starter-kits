@@ -151,6 +151,34 @@ const getWalletBalance = new FunctionTool({
   },
 });
 
+const fundWalletTool = new FunctionTool({
+  name: 'circle_wallet_fund',
+  description: 'Fund an agent wallet with testnet USDC using the Circle faucet (BASE only).',
+  parameters: z.object({
+    address: z.string().describe('EVM wallet address to fund (0x...).'),
+  }),
+  execute: async ({ address }) => {
+    log(`circle_wallet_fund address=${address}`);
+    try {
+      const out = circle.runCircle([
+        'wallet',
+        'fund',
+        '--address',
+        address,
+        '--chain',
+        'BASE',
+        '--output',
+        'json',
+      ]);
+      log(`circle_wallet_fund ← done`);
+      return ok(out);
+    } catch (e) {
+      log(`circle_wallet_fund ✗ ${(e as Error).message}`);
+      return err(e);
+    }
+  },
+});
+
 const deployWalletTool = new FunctionTool({
   name: 'circle_deploy_wallet',
   description:
@@ -342,13 +370,14 @@ const payService = new FunctionTool({
     }
 
     // Confirm the seller publishes a payment option on a chain the kit can pay,
-    // and pick which chain to use. Base is preferred; Polygon is the fallback
-    // when the seller offers no Base option. A Solana- or Ethereum-only service
-    // is rejected here with the networks it actually offers.
+    // and pick which chain to use. Base wins when the wallet can afford the call
+    // there; Polygon is used when it is the only chain offered or the only one
+    // holding enough USDC. A Solana- or Ethereum-only service is rejected here
+    // with the networks it actually offers.
     let chain: circle.Chain;
     try {
       const accepts = await circle.getServiceAccepts(url, httpMethod);
-      const picked = circle.preferredChain(accepts);
+      const picked = await circle.chooseChain(accepts, address);
       if (!picked) {
         const offered = accepts.unsupportedNetworks.join(', ') || 'none';
         log(`circle_pay_service ✗ no supported pay option (seller offers: ${offered})`);
@@ -557,6 +586,7 @@ export function buildTools(ask: (q: string) => Promise<string>) {
     listAgentWallets,
     createAgentWallet,
     getWalletBalance,
+    fundWalletTool,
     getGatewayBalance,
     deployWalletTool,
     fundFiatTool,

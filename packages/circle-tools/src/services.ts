@@ -17,10 +17,12 @@
  */
 
 import { runCircle, runCircleJson } from './cli';
+import { getBalance } from './wallet';
 import {
   CHAIN_PREFERENCE,
   chainCli,
   chainFromNetwork,
+  chainLabel,
   DEFAULT_CHAIN,
   type Chain,
 } from './chains';
@@ -91,11 +93,12 @@ export interface PayServiceInput {
  */
 interface RawSearchItem {
   resource?: string;
-  accepts?: Array<{ amount?: string }>;
+  accepts?: Array<{ amount?: string; network?: string }>;
   metadata?: {
     provider?: { name?: string; description?: string };
     description?: string;
     path?: string;
+    method?: string;
   };
 }
 
@@ -103,6 +106,7 @@ interface RawSearchItem {
 interface RawInspection {
   url?: string;
   status?: string;
+  httpStatus?: number;
   description?: string;
   provider?: {
     name?: string;
@@ -115,12 +119,17 @@ interface RawInspection {
   method?: string;
 }
 
-/** Format an atomic USDC amount (e.g. "4000") as a human string ("0.004 USDC"). */
-function formatUsdc(atomic: string | undefined): string | undefined {
+/** Convert an atomic USDC amount (e.g. "4000") to whole USDC (0.004). */
+function atomicToUsdc(atomic: string | undefined): number | undefined {
   if (!atomic) return undefined;
   const n = Number(atomic);
-  if (!Number.isFinite(n)) return undefined;
-  return `${n / 10 ** USDC_DECIMALS} USDC`;
+  return Number.isFinite(n) ? n / 10 ** USDC_DECIMALS : undefined;
+}
+
+/** Format an atomic USDC amount (e.g. "4000") as a human string ("0.004 USDC"). */
+function formatUsdc(atomic: string | undefined): string | undefined {
+  const n = atomicToUsdc(atomic);
+  return n === undefined ? undefined : `${n} USDC`;
 }
 
 /**
@@ -137,14 +146,34 @@ function extractSearchItems(raw: unknown): RawSearchItem[] {
   return [];
 }
 
+/**
+ * Pick the payment option the kit would actually settle on, in CHAIN_PREFERENCE
+ * order. Quoting `accepts[0]` blindly misprices any listing whose first option
+ * is a network the kit cannot pay (Solana leads several marketplace entries), so
+ * unsupported networks are skipped rather than reported as the price.
+ */
+function preferredAccept(
+  accepts: Array<{ amount?: string; network?: string }> | undefined,
+): { amount?: string; chain: Chain } | null {
+  if (!accepts?.length) return null;
+  for (const chain of CHAIN_PREFERENCE) {
+    const match = accepts.find((a) => a.network && chainFromNetwork(a.network) === chain);
+    if (match) return { amount: match.amount, chain };
+  }
+  return null;
+}
+
 function mapSearchItem(item: RawSearchItem): Service {
   const meta = item.metadata ?? {};
   const provider = meta.provider ?? {};
+  const accept = preferredAccept(item.accepts);
   return {
     url: item.resource ?? '',
     name: provider.name ?? meta.path ?? item.resource ?? 'unknown service',
     description: meta.description ?? provider.description,
-    price: formatUsdc(item.accepts?.[0]?.amount),
+    price: formatUsdc(accept?.amount),
+    chain: accept?.chain,
+    method: meta.method ? meta.method.toUpperCase() : undefined,
   };
 }
 
@@ -176,8 +205,10 @@ export async function inspectService(input: InspectServiceInput): Promise<Servic
     name: provider.name ?? data.description ?? data.url ?? input.url,
     description: data.description ?? provider.description,
     price: data.price?.formatted ?? formatUsdc(data.price?.amount),
+    priceUsdc: atomicToUsdc(data.price?.amount),
     schema: data.input,
     health: data.status,
+    httpStatus: typeof data.httpStatus === 'number' ? data.httpStatus : undefined,
     method: data.method ? data.method.toUpperCase() : undefined,
     openApiUrl: provider.openApiUrl,
     docsUrl: provider.docsUrl,
@@ -293,9 +324,18 @@ export async function getServiceAccepts(url: string, method = 'GET'): Promise<Se
   // so a GET probe would miss the challenge entirely. The 402 is returned before
   // the request body is read, so the probe needs no body to see the options.
   const probeMethod = method.toUpperCase();
+  // A body method needs a body on the probe. x402 middleware normally answers
+  // 402 before the handler runs, but a seller that parses or schema-validates
+  // the body first answers 400/422 to a bodyless POST — which reads here as "no
+  // challenge" and wrongly marks a payable service unpayable. An empty JSON
+  // object is the cheapest body that survives that parse; it is never charged,
+  // because the 402 precedes any handling.
+  const probeInit: RequestInit = BODY_METHODS.has(probeMethod)
+    ? { method: probeMethod, headers: { 'content-type': 'application/json' }, body: '{}' }
+    : { method: probeMethod };
   let res: Response;
   try {
-    res = await fetch(url, { method: probeMethod });
+    res = await fetch(url, probeInit);
   } catch (e) {
     throw new Error(
       `Could not reach ${url} to read its x402 payment options: ${(e as Error).message}`,
@@ -354,6 +394,58 @@ export function preferredChain(accepts: ServiceAccepts): Chain | null {
     if (accepts.options.some((o) => o.chain === chain)) return chain;
   }
   return null;
+}
+
+/** A wallet's USDC on a chain, or null when the balance cannot be read. */
+async function usdcOn(address: string, chain: Chain): Promise<number | null> {
+  try {
+    const balance = await getBalance({ address, chain });
+    const usdc = balance.tokens.find((t) => t.symbol === 'USDC')?.amount;
+    const n = Number(usdc ?? '0');
+    return Number.isFinite(n) ? n : null;
+  } catch {
+    return null;
+  }
+}
+
+/** The cheapest price the seller quotes on a chain, in whole USDC. */
+function priceOn(accepts: ServiceAccepts, chain: Chain): number | null {
+  const amounts = accepts.options
+    .filter((o) => o.chain === chain)
+    .map((o) => atomicToUsdc(o.amountAtomic))
+    .filter((n): n is number => n !== undefined);
+  return amounts.length ? Math.min(...amounts) : null;
+}
+
+/**
+ * Pick the chain to pay a service on, preferring one the wallet can actually
+ * afford.
+ *
+ * `preferredChain` answers only "which chains does the seller offer", so a
+ * wallet funded on Polygon paying a seller that offers both chains would be sent
+ * to Base and fail for want of funds. This walks CHAIN_PREFERENCE and returns
+ * the first chain that is both offered *and* covered by the wallet's balance
+ * there, so Base still wins whenever it is funded and Polygon is used when it is
+ * the only chain with money on it.
+ *
+ * Falls back to `preferredChain` when no chain is affordable (or when balances
+ * cannot be read), leaving the pre-spend price guard to report the shortfall
+ * against a concrete chain rather than silently picking nothing.
+ */
+export async function chooseChain(
+  accepts: ServiceAccepts,
+  address: string,
+): Promise<Chain | null> {
+  const offered = CHAIN_PREFERENCE.filter((c) => accepts.options.some((o) => o.chain === c));
+  if (offered.length <= 1) return offered[0] ?? null;
+  for (const chain of offered) {
+    const [balance, price] = await Promise.all([
+      usdcOn(address, chain),
+      Promise.resolve(priceOn(accepts, chain)),
+    ]);
+    if (balance !== null && price !== null && balance >= price) return chain;
+  }
+  return preferredChain(accepts);
 }
 
 /**
@@ -490,6 +582,65 @@ interface RawPayEnvelope {
  * the payment proceeds, so a flaky spec fetch never blocks an otherwise valid
  * call. Only a positively-proven-invalid value stops the payment.
  */
+/**
+ * `health` values that mean the marketplace could not get a payable answer out
+ * of the endpoint. Anything else — including the unknown-to-us — is treated as
+ * fine, so a new status string never blocks a working service.
+ */
+const DEAD_HEALTH = new Set(['down', 'offline', 'unreachable', 'unhealthy', 'error', 'unpayable']);
+
+/**
+ * Refuse to pay a service the marketplace has already observed to be broken.
+ *
+ * The kit surfaces `health` on every inspect and its tool descriptions promise
+ * the agent it means something, but nothing acted on it: a service the
+ * marketplace last saw returning 500s was paid anyway, and x402 charges before
+ * the upstream answers, so the USDC went to buy an error.
+ *
+ * Only positively-bad signals block: a `health` in {@link DEAD_HEALTH}, or a
+ * probe `httpStatus` of 5xx. A missing or unrecognised status proceeds.
+ */
+function assertServiceHealthy(url: string, inspection: ServiceInspection | null): void {
+  if (!inspection) return;
+  const health = inspection.health?.toLowerCase();
+  const dead = (health && DEAD_HEALTH.has(health)) || (inspection.httpStatus ?? 0) >= 500;
+  if (!dead) return;
+  const detail = [
+    health ? `status \`${inspection.health}\`` : null,
+    inspection.httpStatus ? `last probe returned HTTP ${inspection.httpStatus}` : null,
+  ]
+    .filter(Boolean)
+    .join(', ');
+  throw new Error(
+    `Not paying ${url}: the marketplace reports this service as not working (${detail}). ` +
+      'x402 charges before the upstream request resolves, so paying a service that is down ' +
+      'buys an error. NO PAYMENT WAS MADE. Choose a different service.',
+  );
+}
+
+/**
+ * Refuse to pay when the wallet cannot cover the price, before the CLI is
+ * invoked. Nothing previously compared the two, so an underfunded wallet reached
+ * the payment path and failed there with a CLI-level error. Fails open: an
+ * unknown price or an unreadable balance proceeds untouched.
+ */
+async function assertCanAfford(
+  input: PayServiceInput,
+  chain: Chain,
+  inspection: ServiceInspection | null,
+): Promise<void> {
+  const price = inspection?.priceUsdc;
+  if (price === undefined || !Number.isFinite(price)) return;
+  const balance = await usdcOn(input.address, chain);
+  if (balance === null || balance >= price) return;
+  throw new Error(
+    `Not paying ${input.url}: it costs ${price} USDC but wallet ${input.address} holds only ` +
+      `${balance} USDC on ${chainLabel(chain)}. NO PAYMENT WAS MADE. Fund the wallet on ` +
+      `${chainLabel(chain)} (circle_wallet_fund on testnet, or circle_fund_fiat) and retry, ` +
+      'or use a wallet that already holds enough there.',
+  );
+}
+
 async function assertPayloadValid(
   input: PayServiceInput,
   method: string,
@@ -522,7 +673,11 @@ export async function payService(input: PayServiceInput): Promise<PaymentResult>
     inspection = null;
   }
 
-  // Guard the payload against the seller's published constraints before spending;
+  // Every guard below runs before the CLI is invoked, so each one that fires
+  // costs nothing. Cheapest and most decisive first: a dead service, then a
+  // balance that cannot cover the price, then the payload itself.
+  assertServiceHealthy(input.url, inspection);
+  await assertCanAfford(input, input.chain ?? DEFAULT_CHAIN, inspection);
   // x402 charges before the server validates, so a provably-bad field must be
   // caught here, not after the USDC is gone.
   await assertPayloadValid(input, method, inspection);

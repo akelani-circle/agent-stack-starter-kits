@@ -165,6 +165,34 @@ const getWalletBalance = tool(
   },
 );
 
+const fundWalletTool = tool(
+  'circle_wallet_fund',
+  'Fund an agent wallet with testnet USDC using the Circle faucet (BASE only).',
+  {
+    address: z.string().describe('EVM wallet address to fund (0x...).'),
+  },
+  async ({ address }): Promise<ToolResult> => {
+    log(`circle_wallet_fund address=${address}`);
+    try {
+      const out = circle.runCircle([
+        'wallet',
+        'fund',
+        '--address',
+        address,
+        '--chain',
+        'BASE',
+        '--output',
+        'json',
+      ]);
+      log(`circle_wallet_fund ← done`);
+      return ok(out);
+    } catch (e) {
+      log(`circle_wallet_fund ✗ ${(e as Error).message}`);
+      return err(e);
+    }
+  },
+);
+
 const deployWalletTool = tool(
   'circle_deploy_wallet',
   `Deploy an agent wallet's Smart Contract Account on-chain via a one-time, ` +
@@ -342,13 +370,14 @@ const payService = tool(
     }
 
     // Confirm the seller publishes a payment option on a chain the kit can pay,
-    // and pick which chain to use. Base is preferred; Polygon is the fallback
-    // when the seller offers no Base option. A Solana- or Ethereum-only service
-    // is rejected here with the networks it actually offers.
+    // and pick which chain to use. Base wins when the wallet can afford the call
+    // there; Polygon is used when it is the only chain offered or the only one
+    // holding enough USDC. A Solana- or Ethereum-only service is rejected here
+    // with the networks it actually offers.
     let chain: circle.Chain;
     try {
       const accepts = await circle.getServiceAccepts(url, httpMethod);
-      const picked = circle.preferredChain(accepts);
+      const picked = await circle.chooseChain(accepts, address);
       if (!picked) {
         const offered = accepts.unsupportedNetworks.join(', ') || 'none';
         log(`circle_pay_service ✗ no supported pay option (seller offers: ${offered})`);
@@ -502,6 +531,7 @@ const ALL_TOOLS = [
   listAgentWallets,
   createAgentWallet,
   getWalletBalance,
+  fundWalletTool,
   getGatewayBalance,
   deployWalletTool,
   fundFiatTool,

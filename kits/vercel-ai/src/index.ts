@@ -31,7 +31,7 @@ import { runTurn } from './agent';
 import { buildTools, type CircleTools } from './tools';
 import { isQuotaExhausted } from './retry';
 import { BOOTSTRAP_PROMPT, createBalanceReadout } from '@agent-stack-starter-kits/kit-core';
-import { bold, dim, kitLine, red, yellow } from './theme';
+import { bold, kitLine, red, yellow } from './theme';
 
 // The chat UI pins the input to the bottom while logs scroll above it. It is
 // created in main(); the module-level handle lets the fatal handler close it
@@ -107,7 +107,6 @@ async function main(): Promise<void> {
     log('Autonomous Payment Agent demo starting');
     const config = loadConfig();
     log(`chain=${config.chain} provider=${config.provider} model=${config.model}`);
-    log(dim('tip: type "exit" at any prompt to quit'));
 
     // ── Auth ─────────────────────────────────────────────────────────────────
     // Check the Circle CLI session before running the agent. Logs in with email
@@ -140,10 +139,10 @@ async function main(): Promise<void> {
     // After the bootstrap turn the demo drops into an interactive REPL.
     // Each turn keeps full conversation context: messages grows, and the same
     // `tools` object (with the same `ask` closure) is reused.
-    log('bootstrap complete — continue the conversation or type "exit" to quit');
+    log('bootstrap complete — continue the conversation');
 
     while (true) {
-      const input = (await ask('> ')).trim();
+      const input = (await ask('> ', { placeholder: 'type "exit" to quit' })).trim();
       if (input.toLowerCase() === 'quit') {
         log('done.');
         break;

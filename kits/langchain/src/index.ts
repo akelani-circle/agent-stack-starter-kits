@@ -24,7 +24,16 @@ import { ensureSession, type AskFn } from '@agent-stack-starter-kits/circle-tool
 import { BOOTSTRAP_PROMPT, createBalanceReadout } from '@agent-stack-starter-kits/kit-core';
 import { buildAgent } from './agent';
 import { loadConfig } from './config';
-import { bold, colorizeJson, dim, green, heading, kitLine, red, yellow } from './theme';
+import {
+  bold,
+  colorizeJson,
+  green,
+  heading,
+  humanizeLatexSymbols,
+  kitLine,
+  red,
+  yellow,
+} from './theme';
 
 // The chat UI pins the input to the bottom while logs scroll above it. It is
 // created in main(); the module-level handle lets the fatal handler close it
@@ -168,7 +177,7 @@ function printFinal(result: AgentResult): void {
   const finalContent = isEmptyContent(content)
     ? yellow('(empty model response — provider may be degraded; try again in a moment)')
     : typeof content === 'string'
-      ? content
+      ? humanizeLatexSymbols(content)
       : colorizeJson(content);
 
   out(`\n${heading('--- agent reply ---')}\n`);
@@ -185,7 +194,6 @@ async function main(): Promise<void> {
   log('Autonomous Payment Agent demo starting');
   const config = loadConfig();
   log(`chain=BASE provider=${config.provider} model=${config.model}`);
-  log(dim('tip: type "exit" at any prompt to quit'));
 
   // The marketplace's own bootstrap prompt. setup.md drives the first turn.
   const userPrompt = BOOTSTRAP_PROMPT;
@@ -241,7 +249,7 @@ async function main(): Promise<void> {
       balance.refreshSoon();
     }
 
-    const next = (await ask('> ')).trim();
+    const next = (await ask('> ', { placeholder: 'type "exit" to quit' })).trim();
     if (next.toLowerCase() === 'quit') {
       log('done.');
       break;

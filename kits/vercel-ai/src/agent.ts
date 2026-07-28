@@ -22,7 +22,7 @@ import { openai } from '@ai-sdk/openai';
 import type { CoreMessage, LanguageModel } from 'ai';
 import type { KitConfig, ProviderConfig } from './config';
 import type { CircleTools } from './tools';
-import { heading, kitLine, yellow } from './theme';
+import { heading, humanizeLatexSymbols, kitLine, yellow } from './theme';
 
 /**
  * Pick the Vercel AI SDK LanguageModel based on the detected provider.
@@ -74,7 +74,7 @@ export async function runTurn(
       // Print any prose the model emitted in this step. Tool calls are logged
       // inside each tool's execute function, so we only need to surface text.
       if (text.trim()) {
-        console.log(`\n${heading('--- agent ---')}\n${text}`);
+        console.log(`\n${heading('--- agent ---')}\n${humanizeLatexSymbols(text)}`);
       }
       // Surface a warning when the cap is reached so users understand why the
       // agent stopped mid-task rather than silently abandoning work.

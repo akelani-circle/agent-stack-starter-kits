@@ -25,7 +25,7 @@ import { ensureSession, type AskOptions } from '@agent-stack-starter-kits/circle
 import { BOOTSTRAP_PROMPT, createBalanceReadout } from '@agent-stack-starter-kits/kit-core';
 import { buildAgent } from './agent';
 import { loadConfig } from './config';
-import { bold, kitLine } from './theme';
+import { bold, humanizeLatexSymbols, kitLine } from './theme';
 
 // The chat UI pins the input to the bottom while logs scroll above it. It is
 // created in main(); the module-level handle lets the fatal handler close it
@@ -85,11 +85,10 @@ async function main(): Promise<void> {
   result = await resolveInterruptions(result, agent);
   chat.setStatus(null);
   balance.refreshSoon();
-  out(result.finalOutput ?? '(no output)');
+  out(humanizeLatexSymbols(result.finalOutput ?? '(no output)'));
 
-  log('continue the conversation — type "exit" to quit');
   while (true) {
-    const input = await ask('> ');
+    const input = await ask('> ', { placeholder: 'type "exit" to quit' });
     if (input.toLowerCase() === 'exit') break;
     // A blank line is a stray Enter, not an intent to quit: re-prompt.
     if (!input) continue;
@@ -101,7 +100,7 @@ async function main(): Promise<void> {
     result = await resolveInterruptions(result, agent);
     chat.setStatus(null);
     balance.refreshSoon();
-    out('\n' + (result.finalOutput ?? '(no output)') + '\n');
+    out('\n' + humanizeLatexSymbols(result.finalOutput ?? '(no output)') + '\n');
   }
 
   log('onboarding complete');

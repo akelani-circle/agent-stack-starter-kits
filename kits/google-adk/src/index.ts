@@ -19,12 +19,28 @@
 import { InMemoryRunner, isFinalResponse, LogLevel, setLogLevel, type Event } from '@google/adk';
 import type { Content } from '@google/genai';
 import { createChatUi, type ChatUi } from '@agent-stack-starter-kits/agent-cli';
-import { ensureSession, type AskFn } from '@agent-stack-starter-kits/circle-tools';
+import {
+  ensureSession,
+  inspectService,
+  type AskFn,
+  type Service,
+} from '@agent-stack-starter-kits/circle-tools';
 
 import { BOOTSTRAP_PROMPT, createBalanceReadout } from '@agent-stack-starter-kits/kit-core';
 import { buildAgent, type ApprovalFn } from './agent';
+import { createCommandRouter } from './commands';
 import { loadConfig } from './config';
-import { bold, colorizeJson, dim, green, heading, kitLine, red, yellow } from './theme';
+import {
+  bold,
+  colorizeJson,
+  dim,
+  green,
+  heading,
+  humanizeLatexSymbols,
+  kitLine,
+  red,
+  yellow,
+} from './theme';
 
 const APP_NAME = 'circle-payment-agent';
 const USER_ID = 'demo-user';
@@ -74,6 +90,51 @@ function userMessage(text: string): Content {
   return { role: 'user', parts: [{ text }] };
 }
 
+/**
+ * Pull `circle_search_services` results out of an event, when this event is
+ * that tool's response. Lets the command router's numbered quick-pick track
+ * searches the agent runs on its own, not just ones typed as `/discover`.
+ */
+function extractSearchResults(event: Event): Service[] | null {
+  const parts = event.content?.parts ?? [];
+  for (const part of parts) {
+    if (part.functionResponse?.name !== 'circle_search_services') continue;
+    // The tool wraps its array result as `{ services: [...] }` (see tools.ts):
+    // Gemini's function_response.response proto field is a Struct, not a
+    // repeating field, so a bare array there 400s the next turn.
+    const services = part.functionResponse.response?.services;
+    if (Array.isArray(services)) return services as Service[];
+  }
+  return null;
+}
+
+/**
+ * One-line, human-first summary of a pending spend, shown above the raw JSON
+ * in the approval prompt. The tool args alone don't carry the price for
+ * `circle_pay_service` (it's resolved live from the seller's x402 challenge at
+ * pay time, not passed in), so this re-inspects the service to surface it.
+ * Best-effort: any lookup failure falls back to the raw JSON dump alone rather
+ * than blocking or misrepresenting the approval.
+ */
+async function describeSpend(toolName: string, args: Record<string, unknown>): Promise<string | null> {
+  try {
+    if (toolName === 'circle_pay_service') {
+      const url = String(args.url ?? '');
+      const inspection = await inspectService({ url });
+      const price = inspection.price ? bold(inspection.price) : dim('(price unknown)');
+      return `${bold('pay')} ${price} → ${inspection.name}\n${dim(url)}`;
+    }
+    if (toolName === 'circle_gateway_deposit') {
+      const url = String(args.url ?? '');
+      const amount = args.amount;
+      return `${bold('gateway deposit')} ${bold(`$${amount} USDC`)} for ${dim(url)}`;
+    }
+  } catch {
+    return null;
+  }
+  return null;
+}
+
 async function main(): Promise<void> {
   // Pin the input to the bottom (Claude Code-style) while logs scroll above.
   // Falls back to plain console + readline when stdout/stdin is not a TTY.
@@ -104,6 +165,8 @@ async function main(): Promise<void> {
   // approval prompt; every other tool runs without a pause.
   const approve: ApprovalFn = async (toolName, args) => {
     log(yellow(`approval required for tool: ${bold(toolName)}`));
+    const summary = await describeSpend(toolName, args);
+    if (summary) out(summary);
     out(colorizeJson(args));
     const answer = (await ask(bold('Approve this action? [y/N] '))).trim().toLowerCase();
     const approved = answer === 'y' || answer === 'yes';
@@ -130,6 +193,10 @@ async function main(): Promise<void> {
     userId: USER_ID,
   });
 
+  // Handles "/balance", "/discover <keyword>", etc. (direct circle-tools calls,
+  // no model turn spent) and bare-number replies to a prior "/discover" list.
+  const commands = createCommandRouter({ log, out, refreshBalance: balance.refresh });
+
   log('invoking agent ...');
   // `null` means "no new turn to run" — used for the blank-line re-prompt so we
   // never re-invoke the agent without a fresh user message.
@@ -155,8 +222,10 @@ async function main(): Promise<void> {
           log(red(`model error ${event.errorCode}: ${event.errorMessage ?? '(no message)'}`));
           continue;
         }
+        const searchResults = extractSearchResults(event);
+        if (searchResults) commands.setLastServices(searchResults);
         if (!isFinalResponse(event)) continue;
-        const text = extractText(event);
+        const text = humanizeLatexSymbols(extractText(event));
         if (!text) continue;
         out(`\n${heading('--- agent reply ---')}\n`);
         out(text);
@@ -166,14 +235,21 @@ async function main(): Promise<void> {
       balance.refreshSoon();
     }
 
-    const next = (await ask('> ')).trim();
+    const next = (await ask('> ', { placeholder: 'try "/help" for quick commands' })).trim();
     if (next.toLowerCase() === 'quit') {
       log('done.');
       break;
     }
     // A blank line is a stray Enter, not an intent to quit: re-prompt without
     // running a turn. `exit` (handled in `ask`) and `quit` still halt.
-    input = next ? userMessage(next) : null;
+    if (!next) {
+      input = null;
+      continue;
+    }
+    // "/command" and a bare number picking a prior "/discover" result are
+    // handled locally; everything else goes to the agent as a normal turn.
+    const outcome = await commands.run(next);
+    input = outcome.handled ? (outcome.forward ? userMessage(outcome.forward) : null) : userMessage(next);
   }
 
   // Unmount the UI (and restore the patched console) so the process can exit.

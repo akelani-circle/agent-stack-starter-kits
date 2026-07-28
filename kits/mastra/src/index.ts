@@ -24,7 +24,7 @@ import { BOOTSTRAP_PROMPT, createBalanceReadout } from '@agent-stack-starter-kit
 import { onboardingWorkflow } from './workflow';
 import { buildAgent } from './agent';
 import { loadConfig } from './config';
-import { bold, kitLine } from './theme';
+import { bold, humanizeLatexSymbols, kitLine } from './theme';
 
 // The chat UI pins the input to the bottom while logs scroll above it. It is
 // created in main(); the module-level handle lets the fatal handler close it
@@ -104,10 +104,9 @@ async function main(): Promise<void> {
     (result as any).result?.summary ??
     (result as any).steps?.agent?.output?.summary ??
     '(no output)';
-  out(summary);
+  out(humanizeLatexSymbols(summary));
   balance.refreshSoon();
 
-  log('continue the conversation — type "exit" to quit');
   const agent = buildAgent(config, ask);
   const messages: Array<{ role: 'user'; content: string } | { role: 'assistant'; content: string }> = [
     { role: 'user', content: BOOTSTRAP_PROMPT },
@@ -115,7 +114,7 @@ async function main(): Promise<void> {
   ];
 
   while (true) {
-    const input = await ask('> ');
+    const input = await ask('> ', { placeholder: 'type "exit" to quit' });
     if (input.toLowerCase() === 'exit') break;
     // A blank line is a stray Enter, not an intent to quit: re-prompt.
     if (!input) continue;
@@ -127,7 +126,7 @@ async function main(): Promise<void> {
     );
     chat.setStatus(null);
     balance.refreshSoon();
-    const text = response.text ?? '(no output)';
+    const text = humanizeLatexSymbols(response.text ?? '(no output)');
     out('\n' + text + '\n');
     messages.push({ role: 'assistant', content: text });
   }

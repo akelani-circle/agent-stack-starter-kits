@@ -40,6 +40,8 @@ export const TERMS_MESSAGE =
 export interface AskOptions {
   /** False keeps the answer out of the terminal transcript (secrets). */
   echo?: boolean;
+  /** Grey hint text shown in the input box while it's empty, e.g. a pointer to `/help`. */
+  placeholder?: string;
 }
 
 /**

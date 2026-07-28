@@ -29,7 +29,17 @@ import { ensureSession, type AskFn } from '@agent-stack-starter-kits/circle-tool
 import { BOOTSTRAP_PROMPT, createBalanceReadout } from '@agent-stack-starter-kits/kit-core';
 import { buildQueryOptions } from './agent';
 import { loadConfig } from './config';
-import { bold, colorizeJson, dim, green, heading, kitLine, red, yellow } from './theme';
+import {
+  bold,
+  colorizeJson,
+  dim,
+  green,
+  heading,
+  humanizeLatexSymbols,
+  kitLine,
+  red,
+  yellow,
+} from './theme';
 import { SPEND_TOOLS } from './tools';
 
 // The chat UI pins the input to the bottom while logs scroll above it. It is
@@ -79,7 +89,7 @@ function printAssistant(msg: Extract<SDKMessage, { type: 'assistant' }>): void {
   for (const block of blocks) {
     if (block.type === 'text' && block.text.trim()) {
       out(`\n${heading('--- agent ---')}\n`);
-      out(block.text.trimEnd());
+      out(humanizeLatexSymbols(block.text.trimEnd()));
     }
   }
 }
@@ -107,7 +117,6 @@ async function main(): Promise<void> {
   log('Autonomous Payment Agent demo starting');
   const config = loadConfig();
   log(`chain=BASE model=${config.model} auth=ANTHROPIC_API_KEY`);
-  log(dim('tip: type "exit" at any prompt to quit'));
 
   // Every prompt (chat input, approval [y/N], email/OTP) flows through the same
   // pinned input box the chat UI renders at the bottom of the terminal.
@@ -207,9 +216,9 @@ async function main(): Promise<void> {
       balance.refreshSoon();
       // A blank line is a stray Enter, not an intent to quit: re-prompt without
       // feeding the input stream. `exit` (handled in `ask`) and `quit` still halt.
-      let next = (await ask('> ')).trim();
+      let next = (await ask('> ', { placeholder: 'type "exit" to quit' })).trim();
       while (!next) {
-        next = (await ask('> ')).trim();
+        next = (await ask('> ', { placeholder: 'type "exit" to quit' })).trim();
       }
       if (next.toLowerCase() === 'quit') {
         log('done.');

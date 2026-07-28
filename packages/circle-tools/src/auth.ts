@@ -17,6 +17,7 @@
  */
 
 import { CircleCliError, runCircle } from './cli';
+import { invalidateWalletPick } from './wallet';
 
 /**
  * Framework-agnostic Circle CLI session handling: status checks, the two-step
@@ -59,9 +60,9 @@ function rawText(e: unknown): string {
 }
 
 /** `circle wallet status` exits non-zero when logged out; capture either way. */
-function statusText(): string {
+async function statusText(): Promise<string> {
   try {
-    return runCircle(['wallet', 'status', '--type', 'agent', '--output', 'json']);
+    return await runCircle(['wallet', 'status', '--type', 'agent', '--output', 'json']);
   } catch (e) {
     return rawText(e);
   }
@@ -122,8 +123,12 @@ function parseRequestId(out: string): string | undefined {
 }
 
 /** Snapshot of the current CLI session, for callers that want to branch on it. */
-export function sessionStatus(): { loggedIn: boolean; termsPending: boolean; raw: string } {
-  const raw = statusText();
+export async function sessionStatus(): Promise<{
+  loggedIn: boolean;
+  termsPending: boolean;
+  raw: string;
+}> {
+  const raw = await statusText();
   return { loggedIn: isLoggedIn(raw), termsPending: termsPending(raw), raw };
 }
 
@@ -147,7 +152,7 @@ async function runEmailOtpLogin(io: Required<InteractiveIo>): Promise<void> {
 
     let initOut: string;
     try {
-      initOut = runCircle(['wallet', 'login', email, '--type', 'agent', '--init']);
+      initOut = await runCircle(['wallet', 'login', email, '--type', 'agent', '--init']);
     } catch (e) {
       const text = rawText(e);
       if (termsPending(text)) throw new Error(TERMS_MESSAGE);
@@ -173,7 +178,7 @@ async function runEmailOtpLogin(io: Required<InteractiveIo>): Promise<void> {
 
     let otpOut = '';
     try {
-      otpOut = runCircle(['wallet', 'login', '--request', requestId, '--otp', otp]);
+      otpOut = await runCircle(['wallet', 'login', '--request', requestId, '--otp', otp]);
     } catch (e) {
       const text = rawText(e);
       if (termsPending(text)) throw new Error(TERMS_MESSAGE);
@@ -195,7 +200,7 @@ async function runEmailOtpLogin(io: Required<InteractiveIo>): Promise<void> {
     let sessionOk = false;
     for (let attempt = 0; attempt < 3; attempt++) {
       if (attempt > 0) await new Promise((r) => setTimeout(r, 1000));
-      lastStatus = statusText();
+      lastStatus = await statusText();
       if (isLoggedIn(lastStatus)) { sessionOk = true; break; }
     }
     if (!sessionOk) {
@@ -209,6 +214,8 @@ async function runEmailOtpLogin(io: Required<InteractiveIo>): Promise<void> {
         `Login completed but no valid session was produced (status: ${lastStatus.trim()}).${hint} Re-run the demo.`,
       );
     }
+    // A different account means a different set of wallets.
+    invalidateWalletPick();
     log('logged in, Circle session valid');
     return;
   }
@@ -231,8 +238,8 @@ function withDefaults(io: InteractiveIo): Required<InteractiveIo> {
  * reports a logged-out session whenever *either* environment is logged out.
  * `sessionStatus` parses the JSON output and accepts either one being valid.
  */
-export function requireSession(): void {
-  const { loggedIn, termsPending: pending, raw } = sessionStatus();
+export async function requireSession(): Promise<void> {
+  const { loggedIn, termsPending: pending, raw } = await sessionStatus();
   if (loggedIn) return;
   if (pending) throw new Error(TERMS_MESSAGE);
   throw new Error(
@@ -254,7 +261,7 @@ export function requireSession(): void {
  */
 export async function ensureSession(io: InteractiveIo): Promise<SessionResult> {
   const ready = withDefaults(io);
-  const status = statusText();
+  const status = await statusText();
   if (isLoggedIn(status)) {
     ready.log('Circle session valid, skipping login');
     return { status: 'already-valid' };
@@ -273,11 +280,12 @@ export async function ensureSession(io: InteractiveIo): Promise<SessionResult> {
  * the caller's view: when there is no active session the CLI reports it and this
  * returns without error so a logout tool never crashes the demo.
  */
-export function logout(log?: (line: string) => void): void {
-  if (!sessionStatus().loggedIn) {
+export async function logout(log?: (line: string) => void): Promise<void> {
+  if (!(await sessionStatus()).loggedIn) {
     log?.('no active Circle session, nothing to log out of');
     return;
   }
-  runCircle(['wallet', 'logout', '--type', 'agent']);
+  await runCircle(['wallet', 'logout', '--type', 'agent']);
+  invalidateWalletPick();
   log?.('logged out, Circle session cleared');
 }

@@ -43,7 +43,7 @@ const authStep = createStep({
   inputSchema: z.object({}),
   outputSchema: z.object({ authenticated: z.literal(true) }),
   execute: async () => {
-    requireSession();
+    await requireSession();
     return { authenticated: true as const };
   },
 });

@@ -101,7 +101,7 @@ function unwrap(raw: unknown): RawGatewayData {
  * `circle gateway balance --address <addr> --chain BASE --output json`
  */
 export async function gatewayBalance(input: GatewayBalanceInput): Promise<GatewayBalance> {
-  const raw = runCircleJson<unknown>(
+  const raw = await runCircleJson<unknown>(
     [
       'gateway',
       'balance',
@@ -175,7 +175,7 @@ export async function gatewayDeposit(input: GatewayDepositInput): Promise<Gatewa
   // the destination chain as both source and destination.
   const cliSourceChain = method === 'eco' ? chainCli('BASE') : chainCli(destChain);
 
-  const out = runCircle([
+  const out = await runCircle([
     'gateway',
     'deposit',
     '--amount',

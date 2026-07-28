@@ -471,7 +471,7 @@ export function buildCircleServer(ask: (q: string) => Promise<string>) {
     async (): Promise<ToolResult> => {
       log('circle_logout');
       try {
-        circle.logout(log);
+        await circle.logout(log);
         return ok({ loggedOut: true });
       } catch (e) {
         log(`circle_logout ✗ ${(e as Error).message}`);

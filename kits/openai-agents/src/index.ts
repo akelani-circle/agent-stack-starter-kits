@@ -21,12 +21,8 @@ import { createInterface } from 'node:readline/promises';
 import { run, user } from '@openai/agents';
 import type { Agent, RunResult } from '@openai/agents';
 import { createChatUi, withRetry, type ChatUi } from '@agent-stack-starter-kits/agent-cli';
-import {
-  ensureSession,
-  formatUsdcBalance,
-  walletUsdcBalance,
-} from '@agent-stack-starter-kits/circle-tools';
-import { BOOTSTRAP_PROMPT } from '@agent-stack-starter-kits/kit-core';
+import { ensureSession } from '@agent-stack-starter-kits/circle-tools';
+import { BOOTSTRAP_PROMPT, createBalanceReadout } from '@agent-stack-starter-kits/kit-core';
 import { buildAgent } from './agent';
 import { loadConfig } from './config';
 import { bold, kitLine } from './theme';
@@ -50,16 +46,9 @@ function out(line: string): void {
   else console.log(line);
 }
 
-/** Refresh the pinned USDC balance readout. Best-effort: a balance read must
- * never break the session (e.g. before a wallet exists, or on an RPC blip). */
-async function refreshBalance(): Promise<void> {
-  try {
-    const summary = await walletUsdcBalance();
-    ui?.setBalance(summary ? formatUsdcBalance(summary) : null);
-  } catch {
-    // Leave the last shown balance in place.
-  }
-}
+// The pinned USDC readout, shared by every kit (see kit-core/balance). `ui` is
+// passed as a getter because it only exists once main() creates the chat UI.
+const balance = createBalanceReadout(() => ui);
 
 async function ask(question: string): Promise<string> {
   if (ui) return (await ui.ask(question)).trim();
@@ -82,7 +71,7 @@ async function main(): Promise<void> {
   log(`chain=${config.chain} model=${config.model}`);
 
   await ensureSession({ ask, log, bold });
-  await refreshBalance();
+  await balance.refresh();
 
   const agent = buildAgent(config, ask);
   log(`prompt: ${BOOTSTRAP_PROMPT}`);
@@ -95,7 +84,7 @@ async function main(): Promise<void> {
   });
   result = await resolveInterruptions(result, agent);
   chat.setStatus(null);
-  await refreshBalance();
+  balance.refreshSoon();
   out(result.finalOutput ?? '(no output)');
 
   log('continue the conversation — type "exit" to quit');
@@ -111,7 +100,7 @@ async function main(): Promise<void> {
     });
     result = await resolveInterruptions(result, agent);
     chat.setStatus(null);
-    await refreshBalance();
+    balance.refreshSoon();
     out('\n' + (result.finalOutput ?? '(no output)') + '\n');
   }
 

@@ -16,6 +16,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+export * from './balance';
 export * from './skill';
 export * from './theme';
 export * from './tools';

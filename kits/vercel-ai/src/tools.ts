@@ -98,7 +98,7 @@ export function buildTools(ask: AskFn) {
       execute: async () => {
         log('circle_logout');
         try {
-          circle.logout(log);
+          await circle.logout(log);
           return { loggedOut: true };
         } catch (e) {
           log(`circle_logout ✗ ${(e as Error).message}`);

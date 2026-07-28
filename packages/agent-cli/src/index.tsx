@@ -55,10 +55,12 @@ export interface ChatUi {
   /** Pin `question` at the bottom and resolve with the line the user submits. */
   ask(question: string): Promise<string>;
   /**
-   * Turn the animated "working" indicator on (any non-null text) above the
-   * input. Passing null is intentionally a no-op: the indicator is not cleared
-   * here — it stays visible until control is handed back to the user via the
-   * next `ask()`, so it never blinks out during the gap before an answer prints.
+   * Legacy no-op, kept so the kits' existing calls still compile.
+   *
+   * The busy indicator is no longer switched on and off by hand: it is derived
+   * from whether the input is accepting a line (see `Snapshot.question`), which
+   * is the only thing "busy" ever meant. Toggling it separately let the two
+   * drift apart — the indicator would stop while the input stayed disabled.
    */
   setStatus(text: string | null): void;
   /** Show (or clear, with null) a persistent balance line pinned above the input. */
@@ -79,9 +81,13 @@ interface LogItem {
 
 interface Snapshot {
   logs: LogItem[];
+  /**
+   * The pending question, or null when the agent holds control. This single
+   * field drives BOTH halves of the bottom row: a question enables the input,
+   * null disables it and shows the animated "Working…" placeholder. They are
+   * one state, so they cannot contradict each other.
+   */
   question: string | null;
-  /** Whether the animated "working" indicator is shown (agent busy, input off). */
-  working: boolean;
   balance: string | null;
 }
 
@@ -108,7 +114,9 @@ function toLabel(question: string): string {
 
 function createInkUi(options: ChatUiOptions): ChatUi {
   const initialLogs: LogItem[] = options.title ? [{ id: 0, text: options.title }] : [];
-  let snapshot: Snapshot = { logs: initialLogs, question: null, working: false, balance: null };
+  // Starts with no question pending: the kit is booting (config, session check,
+  // first balance read), which is busy time and reads as such.
+  let snapshot: Snapshot = { logs: initialLogs, question: null, balance: null };
   let nextId = 1;
   const listeners = new Set<() => void>();
 
@@ -134,8 +142,9 @@ function createInkUi(options: ChatUiOptions): ChatUi {
     new Promise<string>((resolve) => {
       resolveAsk = resolve;
       // Re-enabling the input is the one moment control returns to the user, so
-      // this is where the "working" indicator is cleared — never before.
-      snapshot = { ...snapshot, question, working: false };
+      // this is also the moment the busy indicator stops — by construction now,
+      // since both read the same field.
+      snapshot = { ...snapshot, question };
       emit();
     });
   const submit = (value: string): void => {
@@ -146,14 +155,8 @@ function createInkUi(options: ChatUiOptions): ChatUi {
     resolve?.(value);
   };
 
-  const setStatus = (text: string | null): void => {
-    // Non-null switches the indicator on; null is a deliberate no-op (see the
-    // ChatUi.setStatus docs) so it stays visible until the next `ask()`.
-    if (text === null) return;
-    if (snapshot.working) return;
-    snapshot = { ...snapshot, working: true };
-    emit();
-  };
+  // No-op: the indicator follows the input state (see ChatUi.setStatus).
+  const setStatus = (): void => {};
 
   const setBalance = (text: string | null): void => {
     snapshot = { ...snapshot, balance: text };
@@ -206,17 +209,6 @@ function App({ store, onSubmit }: { store: Store; onSubmit: (value: string) => v
     if (snap.question !== null) setValue('');
   }, [snap.question]);
 
-  // Animate the "working" indicator between one, two and three dots so it reads
-  // as live progress rather than a frozen line. The timer only runs while the
-  // agent is busy; it resets to a single dot each time work starts.
-  const [dotFrame, setDotFrame] = useState(0);
-  useEffect(() => {
-    if (!snap.working) return;
-    setDotFrame(0);
-    const timer = setInterval(() => setDotFrame((f) => (f + 1) % 3), 350);
-    return () => clearInterval(timer);
-  }, [snap.working]);
-
   const handleSubmit = (submitted: string): void => {
     setValue('');
     onSubmit(submitted);
@@ -224,6 +216,23 @@ function App({ store, onSubmit }: { store: Store; onSubmit: (value: string) => v
 
   const pending = snap.question !== null;
   const label = pending ? toLabel(snap.question as string) : '';
+
+  // Busy is the exact complement of "the input is taking a line". Deriving it
+  // rather than tracking it separately is what keeps the animation running for
+  // the whole disabled stretch — including the gap between a submitted answer
+  // and the agent's first output, where a hand-toggled flag was still off.
+  const busy = !pending;
+
+  // Animate the "Working" indicator between one, two and three dots so it reads
+  // as live progress rather than a frozen line. The timer only runs while the
+  // agent is busy; it resets to a single dot each time work starts.
+  const [dotFrame, setDotFrame] = useState(0);
+  useEffect(() => {
+    if (!busy) return;
+    setDotFrame(0);
+    const timer = setInterval(() => setDotFrame((f) => (f + 1) % 3), 350);
+    return () => clearInterval(timer);
+  }, [busy]);
 
   // The input box is ALWAYS mounted, even between prompts. Mounting/unmounting
   // it per turn made `ink-text-input`'s `useInput` toggle the terminal's raw
@@ -235,7 +244,6 @@ function App({ store, onSubmit }: { store: Store; onSubmit: (value: string) => v
   return (
     <Box flexDirection="column">
       <Static items={snap.logs}>{(item) => <Text key={item.id}>{item.text}</Text>}</Static>
-      {snap.working ? <Text dimColor>{`working${'.'.repeat(dotFrame + 1)}`}</Text> : null}
       {/* Balance sits ABOVE the input box: rendering it after the input painted
           the readout beneath the prompt, colliding with the caret line. */}
       {snap.balance !== null ? (
@@ -249,7 +257,19 @@ function App({ store, onSubmit }: { store: Store; onSubmit: (value: string) => v
         {label ? <Text>{label}</Text> : null}
         <Box borderStyle="round" paddingX={1} borderColor={pending ? undefined : 'gray'}>
           <Text dimColor={!pending}>{'> '}</Text>
-          <TextInput value={value} onChange={setValue} onSubmit={handleSubmit} />
+          {/* The busy indicator rides in as the placeholder of the (disabled-looking)
+              input rather than as its own line above it. `focus` stays true either
+              way: flipping it would toggle `useInput`'s raw mode mid-session, the
+              exact churn the note above warns about. Only the fake cursor is hidden
+              while working, so the placeholder reads as one dim phrase instead of
+              having its first letter inverted into a caret block. */}
+          <TextInput
+            value={value}
+            onChange={setValue}
+            onSubmit={handleSubmit}
+            showCursor={!busy}
+            placeholder={busy ? `Working${'.'.repeat(dotFrame + 1)}` : ''}
+          />
         </Box>
       </Box>
     </Box>

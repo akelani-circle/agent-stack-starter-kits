@@ -187,15 +187,16 @@ function unwrapData(raw: unknown): RawInspection {
 
 /** `circle services search "<keyword>" --output json` */
 export async function searchServices(input: SearchServicesInput): Promise<Service[]> {
-  const raw = runCircleJson<unknown>(['services', 'search', input.keyword, '--output', 'json'], {
-    retries: READ_RETRIES,
-  });
+  const raw = await runCircleJson<unknown>(
+    ['services', 'search', input.keyword, '--output', 'json'],
+    { retries: READ_RETRIES },
+  );
   return extractSearchItems(raw).map(mapSearchItem);
 }
 
 /** `circle services inspect "<url>" --output json` */
 export async function inspectService(input: InspectServiceInput): Promise<ServiceInspection> {
-  const raw = runCircleJson<unknown>(['services', 'inspect', input.url, '--output', 'json'], {
+  const raw = await runCircleJson<unknown>(['services', 'inspect', input.url, '--output', 'json'], {
     retries: READ_RETRIES,
   });
   const data = unwrapData(raw);
@@ -733,7 +734,7 @@ export async function payService(input: PayServiceInput): Promise<PaymentResult>
 
   let out: string;
   try {
-    out = runCircle(args);
+    out = await runCircle(args);
   } catch (e) {
     throw explainPayError(e, input.url);
   }

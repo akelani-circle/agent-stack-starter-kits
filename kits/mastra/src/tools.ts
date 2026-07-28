@@ -83,7 +83,7 @@ export function buildTools(ask: (q: string) => Promise<string>) {
     execute: async () => {
       log('circle_logout');
       try {
-        circle.logout(log);
+        await circle.logout(log);
         return { loggedOut: true };
       } catch (e) {
         log(`circle_logout ✗ ${(e as Error).message}`);

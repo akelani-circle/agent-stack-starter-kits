@@ -19,12 +19,8 @@
 import 'dotenv/config';
 import { createInterface } from 'node:readline/promises';
 import { createChatUi, withRetry, type ChatUi } from '@agent-stack-starter-kits/agent-cli';
-import {
-  ensureSession,
-  formatUsdcBalance,
-  walletUsdcBalance,
-} from '@agent-stack-starter-kits/circle-tools';
-import { BOOTSTRAP_PROMPT } from '@agent-stack-starter-kits/kit-core';
+import { ensureSession } from '@agent-stack-starter-kits/circle-tools';
+import { BOOTSTRAP_PROMPT, createBalanceReadout } from '@agent-stack-starter-kits/kit-core';
 import { onboardingWorkflow } from './workflow';
 import { buildAgent } from './agent';
 import { loadConfig } from './config';
@@ -49,16 +45,9 @@ function out(line: string): void {
   else console.log(line);
 }
 
-/** Refresh the pinned USDC balance readout. Best-effort: a balance read must
- * never break the session (e.g. before a wallet exists, or on an RPC blip). */
-async function refreshBalance(): Promise<void> {
-  try {
-    const summary = await walletUsdcBalance();
-    ui?.setBalance(summary ? formatUsdcBalance(summary) : null);
-  } catch {
-    // Leave the last shown balance in place.
-  }
-}
+// The pinned USDC readout, shared by every kit (see kit-core/balance). `ui` is
+// passed as a getter because it only exists once main() creates the chat UI.
+const balance = createBalanceReadout(() => ui);
 
 async function ask(question: string): Promise<string> {
   if (ui) return (await ui.ask(question)).trim();
@@ -81,7 +70,7 @@ async function main(): Promise<void> {
   log(`chain=${config.chain} provider=${config.provider} model=${config.model}`);
 
   await ensureSession({ ask, log, bold });
-  await refreshBalance();
+  await balance.refresh();
 
   chat.setStatus('working…');
   const run = await onboardingWorkflow.createRun();
@@ -116,7 +105,7 @@ async function main(): Promise<void> {
     (result as any).steps?.agent?.output?.summary ??
     '(no output)';
   out(summary);
-  await refreshBalance();
+  balance.refreshSoon();
 
   log('continue the conversation — type "exit" to quit');
   const agent = buildAgent(config, ask);
@@ -137,7 +126,7 @@ async function main(): Promise<void> {
       { label: 'agent', log },
     );
     chat.setStatus(null);
-    await refreshBalance();
+    balance.refreshSoon();
     const text = response.text ?? '(no output)';
     out('\n' + text + '\n');
     messages.push({ role: 'assistant', content: text });

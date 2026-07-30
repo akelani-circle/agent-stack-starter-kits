@@ -19,16 +19,15 @@
 import { InMemoryRunner, isFinalResponse, LogLevel, setLogLevel, type Event } from '@google/adk';
 import type { Content } from '@google/genai';
 import { createChatUi, type ChatUi } from '@agent-stack-starter-kits/agent-cli';
-import {
-  ensureSession,
-  inspectService,
-  type AskFn,
-  type Service,
-} from '@agent-stack-starter-kits/circle-tools';
+import { ensureSession, type AskFn, type Service } from '@agent-stack-starter-kits/circle-tools';
 
-import { BOOTSTRAP_PROMPT, createBalanceReadout } from '@agent-stack-starter-kits/kit-core';
+import {
+  BOOTSTRAP_PROMPT,
+  createBalanceReadout,
+  createCommandRouter,
+  describeSpend,
+} from '@agent-stack-starter-kits/kit-core';
 import { buildAgent, type ApprovalFn } from './agent';
-import { createCommandRouter } from './commands';
 import { loadConfig } from './config';
 import {
   bold,
@@ -104,33 +103,6 @@ function extractSearchResults(event: Event): Service[] | null {
     // repeating field, so a bare array there 400s the next turn.
     const services = part.functionResponse.response?.services;
     if (Array.isArray(services)) return services as Service[];
-  }
-  return null;
-}
-
-/**
- * One-line, human-first summary of a pending spend, shown above the raw JSON
- * in the approval prompt. The tool args alone don't carry the price for
- * `circle_pay_service` (it's resolved live from the seller's x402 challenge at
- * pay time, not passed in), so this re-inspects the service to surface it.
- * Best-effort: any lookup failure falls back to the raw JSON dump alone rather
- * than blocking or misrepresenting the approval.
- */
-async function describeSpend(toolName: string, args: Record<string, unknown>): Promise<string | null> {
-  try {
-    if (toolName === 'circle_pay_service') {
-      const url = String(args.url ?? '');
-      const inspection = await inspectService({ url });
-      const price = inspection.price ? bold(inspection.price) : dim('(price unknown)');
-      return `${bold('pay')} ${price} → ${inspection.name}\n${dim(url)}`;
-    }
-    if (toolName === 'circle_gateway_deposit') {
-      const url = String(args.url ?? '');
-      const amount = args.amount;
-      return `${bold('gateway deposit')} ${bold(`$${amount} USDC`)} for ${dim(url)}`;
-    }
-  } catch {
-    return null;
   }
   return null;
 }

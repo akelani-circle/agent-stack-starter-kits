@@ -34,7 +34,16 @@ function pickModel(config: ProviderConfig): LanguageModel {
   if (config.provider === 'anthropic') {
     return anthropic(config.model);
   }
-  return openai(config.model);
+  // @ai-sdk/openai defaults `structuredOutputs` to true for any "reasoning"
+  // model (any id starting with "o" or "gpt-5" — see its isReasoningModel()),
+  // which turns on OpenAI's strict tool-calling mode: every property must
+  // appear in `required`, with optional ones expressed as nullable instead of
+  // omitted. This kit's tool schemas use ordinary zod `.optional()` fields
+  // (chain, method, ...), so strict mode rejects them outright before the
+  // model ever runs ("'required' is required to be supplied and to be an
+  // array including every key in properties"). Force it off to keep the
+  // schemas as declared.
+  return openai(config.model, { structuredOutputs: false });
 }
 
 /**

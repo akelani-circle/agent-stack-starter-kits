@@ -26,7 +26,12 @@ import {
 import { createChatUi, type ChatUi } from '@agent-stack-starter-kits/agent-cli';
 import { ensureSession, type AskFn } from '@agent-stack-starter-kits/circle-tools';
 
-import { BOOTSTRAP_PROMPT, createBalanceReadout } from '@agent-stack-starter-kits/kit-core';
+import {
+  BOOTSTRAP_PROMPT,
+  createBalanceReadout,
+  createCommandRouter,
+  describeSpend,
+} from '@agent-stack-starter-kits/kit-core';
 import { buildQueryOptions } from './agent';
 import { loadConfig } from './config';
 import {
@@ -140,6 +145,8 @@ async function main(): Promise<void> {
       return { behavior: 'allow', updatedInput: input };
     }
     log(yellow(`approval required for tool: ${bold(toolName)}`));
+    const summary = await describeSpend(toolName, input);
+    if (summary) out(summary);
     out(colorizeJson(input));
     const answer = (await ask(bold('Approve this action? [y/N] '))).trim().toLowerCase();
     const approved = answer === 'y' || answer === 'yes';
@@ -189,6 +196,10 @@ async function main(): Promise<void> {
   await ensureSession({ ask, log, bold });
   await balance.refresh();
 
+  // Handles "/balance", "/discover <keyword>", etc. (direct circle-tools calls,
+  // no model turn spent) and bare-number replies to a prior "/discover" list.
+  const commands = createCommandRouter({ log, out, refreshBalance: balance.refresh });
+
   log('invoking agent ...');
   chat.setStatus('working…');
   const session = query({
@@ -214,18 +225,30 @@ async function main(): Promise<void> {
       printResult(msg);
       chat.setStatus(null);
       balance.refreshSoon();
-      // A blank line is a stray Enter, not an intent to quit: re-prompt without
-      // feeding the input stream. `exit` (handled in `ask`) and `quit` still halt.
-      let next = (await ask('> ', { placeholder: 'type "exit" to quit' })).trim();
-      while (!next) {
-        next = (await ask('> ', { placeholder: 'type "exit" to quit' })).trim();
+      // Loop locally until there's either a quit or real text for the agent: a
+      // blank line re-prompts, and "/command"/numbered picks are answered here
+      // without ever feeding the SDK's input stream. `exit` is handled in `ask`.
+      let forward: string | null = null;
+      for (;;) {
+        const next = (await ask('> ', { placeholder: 'type "/help" for quick commands or "exit" to quit' })).trim();
+        if (!next) continue;
+        if (next.toLowerCase() === 'quit') break;
+        const outcome = await commands.run(next);
+        if (!outcome.handled) {
+          forward = next;
+          break;
+        }
+        if (outcome.forward) {
+          forward = outcome.forward;
+          break;
+        }
       }
-      if (next.toLowerCase() === 'quit') {
+      if (forward === null) {
         log('done.');
         pushInput(null);
       } else {
         chat.setStatus('working…');
-        pushInput(userMessage(next));
+        pushInput(userMessage(forward));
       }
     }
   }

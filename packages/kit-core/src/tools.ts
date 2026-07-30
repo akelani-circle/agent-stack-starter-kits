@@ -20,6 +20,7 @@ import {
   chainLabel,
   chooseChain,
   getServiceAccepts,
+  inspectService,
   isWalletDeployed,
   preferredChain,
   sellerRequiresGateway,
@@ -28,7 +29,7 @@ import {
 } from '@agent-stack-starter-kits/circle-tools';
 
 import { SETUP_SKILL_URL, SUB_SKILL_CATALOG } from './skill';
-import { bold, colorizeJson, green, red, yellow } from './theme';
+import { bold, colorizeJson, dim, green, red, yellow } from './theme';
 
 /**
  * The two tools that move USDC. Each kit gates these behind human approval —
@@ -298,6 +299,36 @@ export function selectDepositMethod(chain: Chain): GatewayDepositMethod {
 }
 
 /**
+ * One-line, human-first summary of a pending spend, for display above the raw
+ * JSON in an approval prompt. The tool args alone don't carry the price for
+ * `circle_pay_service` (it's resolved live from the seller's x402 challenge at
+ * pay time, not passed in), so this re-inspects the service to surface it.
+ * Best-effort: any lookup failure returns null so the caller falls back to the
+ * raw JSON dump alone rather than blocking or misrepresenting the approval.
+ */
+export async function describeSpend(
+  toolName: string,
+  args: Record<string, unknown>,
+): Promise<string | null> {
+  try {
+    if (toolName === 'circle_pay_service') {
+      const url = String(args.url ?? '');
+      const inspection = await inspectService({ url });
+      const price = inspection.price ? bold(inspection.price) : dim('(price unknown)');
+      return `${bold('pay')} ${price} → ${inspection.name}\n${dim(url)}`;
+    }
+    if (toolName === 'circle_gateway_deposit') {
+      const url = String(args.url ?? '');
+      const amount = args.amount;
+      return `${bold('gateway deposit')} ${bold(`$${amount} USDC`)} for ${dim(url)}`;
+    }
+  } catch {
+    return null;
+  }
+  return null;
+}
+
+/**
  * Prompt the user to approve or reject a spend tool before it touches USDC.
  *
  * For the frameworks whose tool API has no external approval hook, so the
@@ -312,6 +343,8 @@ export async function approveSpend(
   log: (line: string) => void,
 ): Promise<boolean> {
   log(yellow(`approval required for tool: ${bold(name)}`));
+  const summary = await describeSpend(name, args);
+  if (summary) console.log(summary);
   console.log(colorizeJson(args));
   const answer = (await ask(bold('Approve? [y/N] '))).trim().toLowerCase();
   const approved = answer === 'y' || answer === 'yes';

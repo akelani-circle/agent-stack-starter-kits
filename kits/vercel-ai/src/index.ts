@@ -30,7 +30,11 @@ import { loadConfig, type KitConfig } from './config';
 import { runTurn } from './agent';
 import { buildTools, type CircleTools } from './tools';
 import { isQuotaExhausted } from './retry';
-import { BOOTSTRAP_PROMPT, createBalanceReadout } from '@agent-stack-starter-kits/kit-core';
+import {
+  BOOTSTRAP_PROMPT,
+  createBalanceReadout,
+  createCommandRouter,
+} from '@agent-stack-starter-kits/kit-core';
 import { bold, kitLine, red, yellow } from './theme';
 
 // The chat UI pins the input to the bottom while logs scroll above it. It is
@@ -44,6 +48,12 @@ function log(line: string): void {
   const formatted = kitLine(line);
   if (ui) ui.log(formatted);
   else console.log(formatted);
+}
+
+/** Emit an already-formatted line (JSON, listings) verbatim. */
+function out(line: string): void {
+  if (ui) ui.log(line);
+  else console.log(line);
 }
 
 // The pinned USDC readout, shared by every kit (see kit-core/balance). `ui` is
@@ -141,8 +151,13 @@ async function main(): Promise<void> {
     // `tools` object (with the same `ask` closure) is reused.
     log('bootstrap complete — continue the conversation');
 
+    // Handles "/balance", "/discover <keyword>", etc. (direct circle-tools
+    // calls, no model turn spent) and bare-number replies to a prior
+    // "/discover" list.
+    const commands = createCommandRouter({ log, out, refreshBalance: balance.refresh });
+
     while (true) {
-      const input = (await ask('> ', { placeholder: 'type "exit" to quit' })).trim();
+      const input = (await ask('> ', { placeholder: 'type "/help" for quick commands or "exit" to quit' })).trim();
       if (input.toLowerCase() === 'quit') {
         log('done.');
         break;
@@ -150,7 +165,11 @@ async function main(): Promise<void> {
       // A blank line is a stray Enter, not an intent to quit: re-prompt.
       // `exit` (handled in `ask`) and `quit` still halt.
       if (!input) continue;
-      messages.push({ role: 'user', content: input });
+      // "/command" and a bare number picking a prior "/discover" result are
+      // handled locally; everything else goes to the agent as a normal turn.
+      const outcome = await commands.run(input);
+      if (outcome.handled && !outcome.forward) continue;
+      messages.push({ role: 'user', content: outcome.forward ?? input });
 
       chat.setStatus('working…');
       const { responseMessages: nextMessages } = await runAgentTurn(config, messages, tools);

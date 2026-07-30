@@ -17,7 +17,9 @@
  */
 
 /**
- * Slash commands and numbered service quick-picks for the chat prompt.
+ * Slash commands and numbered service quick-picks for the chat prompt. Shared
+ * by every kit: this only touches `circle-tools` and terminal formatting, so
+ * it carries no framework-specific assumptions about how a kit runs its turns.
  *
  * Read-only lookups (balance, wallets, gateway, discover) are common enough
  * that routing them through the LLM on every turn is pure latency: they map
@@ -33,7 +35,7 @@ import * as circle from '@agent-stack-starter-kits/circle-tools';
 import { bold, dim, red, yellow } from './theme';
 
 export interface CommandContext {
-  /** Emit a namespaced `[adk-kit]` framework line to the scrollback. */
+  /** Emit a namespaced `[<kit>-kit]` framework line to the scrollback. */
   log: (line: string) => void;
   /** Emit an already-formatted line (JSON, listings) verbatim. */
   out: (line: string) => void;
@@ -191,8 +193,9 @@ export function createCommandRouter(ctx: CommandContext) {
      * own (its `circle_search_services` tool, not just `/discover`). Without
      * this, a bare number after an agent-initiated search would either resolve
      * against a stale `/discover` list (silently picking the wrong service) or
-     * fall through as a literal chat message. The caller feeds this from the
-     * runner's event stream; the most recent search, from either source, wins.
+     * fall through as a literal chat message. The caller feeds this from
+     * wherever the kit surfaces a tool result; the most recent search, from
+     * either source, wins.
      */
     setLastServices(services: circle.Service[]): void {
       lastServices = services;

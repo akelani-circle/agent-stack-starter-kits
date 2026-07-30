@@ -33,6 +33,20 @@ Once the wallet is set up, ask for what you want in plain language:
 - `what services are available for weather data?`
 - `top up my wallet with testnet USDC`
 
+## Quick commands
+
+A few common lookups skip the model round-trip and answer directly from `circle-tools`:
+
+| Command | Does |
+| --- | --- |
+| `/help` | list the commands below |
+| `/wallets` | list agent wallet addresses |
+| `/balance` | per-wallet USDC balances |
+| `/gateway` | Circle Gateway balance for the primary wallet |
+| `/discover <keyword>` | search the marketplace |
+
+`/discover` prints a numbered list; reply with just a number (e.g. `1`) to hand that service to the agent instead of retyping its name or URL. That still goes through the agent as a normal turn — and the same approval gate if it leads to a payment — the number is just a shortcut for the reference, not a bypass.
+
 ## Environment
 
 | Variable | Required | Notes |

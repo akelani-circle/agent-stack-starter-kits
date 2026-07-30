@@ -20,7 +20,11 @@ import 'dotenv/config';
 import { createInterface } from 'node:readline/promises';
 import { createChatUi, withRetry, type ChatUi } from '@agent-stack-starter-kits/agent-cli';
 import { ensureSession, type AskOptions } from '@agent-stack-starter-kits/circle-tools';
-import { BOOTSTRAP_PROMPT, createBalanceReadout } from '@agent-stack-starter-kits/kit-core';
+import {
+  BOOTSTRAP_PROMPT,
+  createBalanceReadout,
+  createCommandRouter,
+} from '@agent-stack-starter-kits/kit-core';
 import { onboardingWorkflow } from './workflow';
 import { buildAgent } from './agent';
 import { loadConfig } from './config';
@@ -113,12 +117,20 @@ async function main(): Promise<void> {
     { role: 'assistant', content: summary },
   ];
 
+  // Handles "/balance", "/discover <keyword>", etc. (direct circle-tools calls,
+  // no model turn spent) and bare-number replies to a prior "/discover" list.
+  const commands = createCommandRouter({ log, out, refreshBalance: balance.refresh });
+
   while (true) {
-    const input = await ask('> ', { placeholder: 'type "exit" to quit' });
+    const input = await ask('> ', { placeholder: 'type "/help" for quick commands or "exit" to quit' });
     if (input.toLowerCase() === 'exit') break;
     // A blank line is a stray Enter, not an intent to quit: re-prompt.
     if (!input) continue;
-    messages.push({ role: 'user', content: input });
+    // "/command" and a bare number picking a prior "/discover" result are
+    // handled locally; everything else goes to the agent as a normal turn.
+    const outcome = await commands.run(input);
+    if (outcome.handled && !outcome.forward) continue;
+    messages.push({ role: 'user', content: outcome.forward ?? input });
     chat.setStatus('working…');
     const response = await withRetry(
       (signal) => agent.generate(messages, { maxSteps: 30, abortSignal: signal }),

@@ -19,7 +19,7 @@
 import { InMemoryRunner, isFinalResponse, LogLevel, setLogLevel, type Event } from '@google/adk';
 import type { Content } from '@google/genai';
 import { createChatUi, type ChatUi } from '@agent-stack-starter-kits/agent-cli';
-import { ensureSession, type AskFn, type Service } from '@agent-stack-starter-kits/circle-tools';
+import { ensureSession, type AskFn } from '@agent-stack-starter-kits/circle-tools';
 
 import {
   BOOTSTRAP_PROMPT,
@@ -87,24 +87,6 @@ function extractText(event: Event): string {
 
 function userMessage(text: string): Content {
   return { role: 'user', parts: [{ text }] };
-}
-
-/**
- * Pull `circle_search_services` results out of an event, when this event is
- * that tool's response. Lets the command router's numbered quick-pick track
- * searches the agent runs on its own, not just ones typed as `/discover`.
- */
-function extractSearchResults(event: Event): Service[] | null {
-  const parts = event.content?.parts ?? [];
-  for (const part of parts) {
-    if (part.functionResponse?.name !== 'circle_search_services') continue;
-    // The tool wraps its array result as `{ services: [...] }` (see tools.ts):
-    // Gemini's function_response.response proto field is a Struct, not a
-    // repeating field, so a bare array there 400s the next turn.
-    const services = part.functionResponse.response?.services;
-    if (Array.isArray(services)) return services as Service[];
-  }
-  return null;
 }
 
 async function main(): Promise<void> {
@@ -194,8 +176,6 @@ async function main(): Promise<void> {
           log(red(`model error ${event.errorCode}: ${event.errorMessage ?? '(no message)'}`));
           continue;
         }
-        const searchResults = extractSearchResults(event);
-        if (searchResults) commands.setLastServices(searchResults);
         if (!isFinalResponse(event)) continue;
         const text = humanizeLatexSymbols(extractText(event));
         if (!text) continue;

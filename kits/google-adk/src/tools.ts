@@ -25,6 +25,7 @@ import {
   fetchSubSkill,
   parsePayload,
   preview,
+  recordServiceSearch,
   selectDepositMethod,
   selectGatewayChain,
   selectPayChain,
@@ -270,6 +271,9 @@ const searchServices = new FunctionTool({
     try {
       const result = await circle.searchServices({ keyword });
       log(`circle_search_services ← ${result.length} hit(s)`);
+      // Makes these hits addressable by number at the next prompt, exactly as
+      // if the user had run `/discover` themselves.
+      recordServiceSearch(result);
       // See the matching note on circle_list_wallets: a bare array response
       // crashes the next turn against Gemini, so it's wrapped in an object.
       return ok({ services: result });

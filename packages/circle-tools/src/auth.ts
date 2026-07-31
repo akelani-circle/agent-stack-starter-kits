@@ -170,7 +170,11 @@ async function runEmailOtpLogin(io: Required<InteractiveIo>): Promise<void> {
       const text = rawText(e);
       if (termsPending(text)) throw new Error(TERMS_MESSAGE);
       log(`login init failed: ${text}`);
-      log('check the address and re-enter it; type "/help" for quick commands or "exit" to quit');
+      // No "/help" hint here, or at any other prompt in this file: the slash
+      // commands are routed by the kit's chat loop, which does not exist yet —
+      // login runs before it, so "/help" typed here would be read as an email
+      // address. "exit" is handled inside `ask` itself and does work.
+      log('check the address and re-enter it; type "exit" to quit');
       continue;
     }
 
@@ -202,7 +206,7 @@ async function runEmailOtpLogin(io: Required<InteractiveIo>): Promise<void> {
       log(`OTP rejected: ${text}`);
       // The request is now spent regardless of why it failed, so request a fresh
       // code rather than retrying this dead request with the same (or correct) OTP.
-      log('a Circle login code can only be tried once, so a new code is being sent; type "/help" for quick commands or "exit" to quit');
+      log('a Circle login code can only be tried once, so a new code is being sent; type "exit" to quit');
       continue;
     }
     // Surface any stdout from the OTP command — it may contain a Terms-of-Use

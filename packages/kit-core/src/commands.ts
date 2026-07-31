@@ -25,10 +25,15 @@
  * that routing them through the LLM on every turn is pure latency: they map
  * 1:1 onto a `circle-tools` call the kit already makes for its own tools.
  * These commands call `circle-tools` directly and print the result, without
- * spending a model turn. `/discover` additionally remembers its results so a
- * bare number ("2") at the next prompt can stand in for retyping a service
- * name/URL; that still goes to the agent as a normal turn (it may inspect or
- * pay, subject to the existing approval gate), it just saves the typing.
+ * spending a model turn.
+ *
+ * Marketplace searches additionally leave their results addressable, so a bare
+ * number ("2") at the next prompt can stand in for retyping a service name/URL.
+ * That still goes to the agent as a normal turn (it may inspect or pay, subject
+ * to the existing approval gate), it just saves the typing. The list is fed by
+ * `/discover` and by the agent's own `circle_search_services` alike, and stays
+ * addressable only until the next turn reaches the agent — see
+ * `recordServiceSearch` and `disarmQuickPick`.
  */
 import * as circle from '@agent-stack-starter-kits/circle-tools';
 
@@ -50,6 +55,45 @@ export interface CommandOutcome {
   forward?: string;
 }
 
+/**
+ * The marketplace results a bare number may currently stand for, or an empty
+ * list when the shortcut is not in scope (see `disarmQuickPick`).
+ *
+ * Module-level rather than router state because there are two writers: this
+ * file's `/discover`, and every kit's `circle_search_services` tool, which is
+ * built independently of — and usually before — the router. A kit runs one agent
+ * session per process, so exactly one list is ever in scope.
+ */
+let lastServices: circle.Service[] = [];
+
+/**
+ * Publish search results as the quick-pick list.
+ *
+ * Called by `/discover` and by each kit's `circle_search_services` tool, so a
+ * number resolves against whichever search actually ran last — including one the
+ * agent ran on its own. Routing it through the tool rather than reading it back
+ * out of each framework's message history keeps this to one line per kit and
+ * avoids depending on six different tool-result encodings.
+ */
+export function recordServiceSearch(services: circle.Service[]): void {
+  lastServices = services;
+}
+
+/**
+ * Take the quick-pick out of scope, because the turn is going to the agent.
+ *
+ * A bare number only unambiguously means "that search result" while the list is
+ * the last thing on screen. Once the agent runs it may come back with a question
+ * whose own answer is a number — "how much USDC should I deposit?" — and reading
+ * that "5" as the fifth search result would hijack the answer and put an
+ * unrelated service in front of an approval prompt. Any search the agent runs
+ * during the turn re-arms the list via `recordServiceSearch`, so the shortcut
+ * survives exactly where it stays unambiguous.
+ */
+function disarmQuickPick(): void {
+  lastServices = [];
+}
+
 const HELP = [
   `${bold('/help')}              show this list`,
   `${bold('/wallets')}           list agent wallet addresses`,
@@ -58,11 +102,8 @@ const HELP = [
   `${bold('/discover')} <keyword>  search the marketplace; reply with a number to use a result`,
 ].join('\n');
 
-/** Routes `/command` input and numbered service picks. One instance per session
- * (it remembers the last `/discover` results for the numbered follow-up). */
+/** Routes `/command` input and numbered service picks. One instance per session. */
 export function createCommandRouter(ctx: CommandContext) {
-  let lastServices: circle.Service[] = [];
-
   async function showWallets(): Promise<void> {
     const wallets = await circle.listWallets();
     if (wallets.length === 0) {
@@ -102,7 +143,7 @@ export function createCommandRouter(ctx: CommandContext) {
 
   async function discover(keyword: string): Promise<void> {
     const results = await circle.searchServices({ keyword });
-    lastServices = results;
+    recordServiceSearch(results);
     if (results.length === 0) {
       // The marketplace search matches on a single term, not a phrase, so a
       // multi-word keyword ("flight services") commonly misses where the
@@ -158,7 +199,7 @@ export function createCommandRouter(ctx: CommandContext) {
     return { handled: true };
   }
 
-  /** A bare number, valid only while a `/discover` result list is in scope. */
+  /** A bare number, valid only while a search result list is in scope. */
   function tryNumberedPick(input: string): string | null {
     if (!/^\d+$/.test(input)) return null;
     const service = lastServices[Number(input) - 1];
@@ -184,21 +225,16 @@ export function createCommandRouter(ctx: CommandContext) {
   return {
     async run(rawInput: string): Promise<CommandOutcome> {
       const input = rawInput.trim();
+      // Slash commands answer locally and never reach the agent, so they leave
+      // the quick-pick in scope: `/balance` between a search and its number is
+      // a lookup, not a change of subject.
       if (input.startsWith('/')) return handleSlash(input);
       const forward = tryNumberedPick(input);
+      // Everything from here goes to the agent — a resolved pick and ordinary
+      // chat alike — which is precisely when a bare number stops being
+      // unambiguous. See `disarmQuickPick`.
+      disarmQuickPick();
       return forward ? { handled: true, forward } : { handled: false };
-    },
-    /**
-     * Keep the numbered quick-pick in sync with searches the agent runs on its
-     * own (its `circle_search_services` tool, not just `/discover`). Without
-     * this, a bare number after an agent-initiated search would either resolve
-     * against a stale `/discover` list (silently picking the wrong service) or
-     * fall through as a literal chat message. The caller feeds this from
-     * wherever the kit surfaces a tool result; the most recent search, from
-     * either source, wins.
-     */
-    setLastServices(services: circle.Service[]): void {
-      lastServices = services;
     },
   };
 }

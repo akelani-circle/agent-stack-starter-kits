@@ -45,7 +45,7 @@ A few common lookups skip the model round-trip and answer directly from `circle-
 | `/gateway` | Circle Gateway balance for the primary wallet |
 | `/discover <keyword>` | search the marketplace |
 
-`/discover` prints a numbered list; reply with just a number (e.g. `1`) to hand that service to the agent instead of retyping its name or URL. That still goes through the agent as a normal turn — and the same approval gate if it leads to a payment — the number is just a shortcut for the reference, not a bypass.
+`/discover` prints a numbered list; reply with just a number (e.g. `1`) to hand that service to the agent instead of retyping its name or URL. A search the agent runs on its own is numbered the same way. A number only counts as a pick until the next turn reaches the agent, so a numeric answer to a question the agent asked ("how much USDC?") is never mistaken for a service. Picks still go through the agent as a normal turn — and the same approval gate if one leads to a payment — the number is just a shortcut for the reference, not a bypass.
 
 ## Environment
 

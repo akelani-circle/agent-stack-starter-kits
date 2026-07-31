@@ -20,9 +20,9 @@ import {
   chainLabel,
   chooseChain,
   getServiceAccepts,
-  inspectService,
   isWalletDeployed,
   preferredChain,
+  priceOn,
   sellerRequiresGateway,
   type Chain,
   type GatewayDepositMethod,
@@ -300,9 +300,22 @@ export function selectDepositMethod(chain: Chain): GatewayDepositMethod {
 
 /**
  * One-line, human-first summary of a pending spend, for display above the raw
- * JSON in an approval prompt. The tool args alone don't carry the price for
- * `circle_pay_service` (it's resolved live from the seller's x402 challenge at
- * pay time, not passed in), so this re-inspects the service to surface it.
+ * JSON in an approval prompt. The tool args alone don't carry the price: it is
+ * resolved live from the seller's x402 challenge at pay time, not passed in.
+ *
+ * The numbers here come from the same calls the spend itself is about to make —
+ * `getServiceAccepts` for the challenge, then `chooseChain`/`preferredChain` for
+ * the chain — because an approval prompt that quotes a different source than the
+ * one being charged is worse than no prompt at all. A marketplace listing or an
+ * `inspectService` result would both be cheaper to read and neither is
+ * reconciled against the chain this payment will settle on, so either can show a
+ * price the wallet is not about to be charged.
+ *
+ * The service is identified by URL rather than by its published name for the
+ * same reason: the URL is what gets paid, while the name is a seller-controlled
+ * string and so is exactly the field a bad listing would dress up to look like
+ * something else.
+ *
  * Best-effort: any lookup failure returns null so the caller falls back to the
  * raw JSON dump alone rather than blocking or misrepresenting the approval.
  */
@@ -310,17 +323,34 @@ export async function describeSpend(
   toolName: string,
   args: Record<string, unknown>,
 ): Promise<string | null> {
+  const url = String(args.url ?? '');
+  const method = String(args.method ?? 'GET').toUpperCase();
   try {
     if (toolName === 'circle_pay_service') {
-      const url = String(args.url ?? '');
-      const inspection = await inspectService({ url });
-      const price = inspection.price ? bold(inspection.price) : dim('(price unknown)');
-      return `${bold('pay')} ${price} → ${inspection.name}\n${dim(url)}`;
+      const accepts = await getServiceAccepts(url, method);
+      // Mirrors `selectPayChain`: prefer the chain the wallet can actually
+      // afford, falling back to seller preference when there's no address to
+      // weigh balances against.
+      const address = String(args.address ?? '');
+      const chain = address ? await chooseChain(accepts, address) : preferredChain(accepts);
+      if (!chain) return null;
+      const usdc = priceOn(accepts, chain);
+      const price = usdc === null ? dim('(price unknown)') : bold(`${usdc} USDC`);
+      return `${bold('pay')} ${price} on ${chainLabel(chain)}\n${dim(url)}`;
     }
     if (toolName === 'circle_gateway_deposit') {
-      const url = String(args.url ?? '');
-      const amount = args.amount;
-      return `${bold('gateway deposit')} ${bold(`$${amount} USDC`)} for ${dim(url)}`;
+      const amount = Number(args.amount);
+      if (!Number.isFinite(amount)) return null;
+      // Mirrors `selectGatewayChain` + `selectDepositMethod`. The method is
+      // worth showing: eco settles in ~30s, direct takes 13-19 minutes, and
+      // that difference is the main thing a human is agreeing to here.
+      const accepts = await getServiceAccepts(url, method);
+      const chain = preferredChain(accepts);
+      if (!chain) return null;
+      return (
+        `${bold('gateway deposit')} ${bold(`${amount} USDC`)} on ${chainLabel(chain)} ` +
+        `via ${selectDepositMethod(chain)}\n${dim(`for ${url}`)}`
+      );
     }
   } catch {
     return null;

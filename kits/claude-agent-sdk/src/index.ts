@@ -23,16 +23,12 @@ import {
   type SDKMessage,
   type SDKUserMessage,
 } from '@anthropic-ai/claude-agent-sdk';
-import { createChatUi, type ChatUi } from '@agent-stack-ecosystem-kits/agent-cli';
-import {
-  ensureSession,
-  formatUsdcBalance,
-  walletUsdcBalance,
-} from '@agent-stack-ecosystem-kits/circle-tools';
+import { createChatUi, type ChatUi } from '@agent-stack-starter-kits/agent-cli';
+import { ensureSession, type AskFn } from '@agent-stack-starter-kits/circle-tools';
 
+import { BOOTSTRAP_PROMPT, createBalanceReadout } from '@agent-stack-starter-kits/kit-core';
 import { buildQueryOptions } from './agent';
 import { loadConfig } from './config';
-import { SETUP_SKILL_URL } from './skill';
 import { bold, colorizeJson, dim, green, heading, kitLine, red, yellow } from './theme';
 import { SPEND_TOOLS } from './tools';
 
@@ -55,16 +51,9 @@ function out(line: string): void {
   else console.log(line);
 }
 
-/** Refresh the pinned USDC balance readout. Best-effort: a balance read must
- * never break the session (e.g. before a wallet exists, or on an RPC blip). */
-async function refreshBalance(): Promise<void> {
-  try {
-    const summary = await walletUsdcBalance();
-    ui?.setBalance(summary ? formatUsdcBalance(summary) : null);
-  } catch {
-    // Leave the last shown balance in place.
-  }
-}
+// The pinned USDC readout, shared by every kit (see kit-core/balance). `ui` is
+// passed as a getter because it only exists once main() creates the chat UI.
+const balance = createBalanceReadout(() => ui);
 
 /** True when an error string is an Anthropic "Overloaded" (HTTP 529). The
  * underlying Claude Code subprocess retries 529 itself (those retries surface
@@ -124,8 +113,8 @@ async function main(): Promise<void> {
   // pinned input box the chat UI renders at the bottom of the terminal.
   // `exit` typed at ANY prompt halts the demo immediately, tearing down the UI
   // (which restores the console) before the answer reaches the caller.
-  const ask = async (q: string): Promise<string> => {
-    const answer = await chat.ask(q);
+  const ask: AskFn = async (q, options) => {
+    const answer = await chat.ask(q, options);
     if (answer.trim().toLowerCase() === 'exit') {
       log('exit, halting.');
       chat.close();
@@ -174,13 +163,10 @@ async function main(): Promise<void> {
     });
   }
 
-  // Brief's AGENT BOOTSTRAP PROMPT, verbatim. setup.md drives the first turn.
-  const bootstrapPrompt =
-    `Run curl -sL ${SETUP_SKILL_URL}, ` +
-    'and use the returned setup instructions to set up my agent wallet.';
+  // The marketplace's own bootstrap prompt. setup.md drives the first turn.
 
   async function* inputStream(): AsyncGenerator<SDKUserMessage> {
-    yield userMessage(bootstrapPrompt);
+    yield userMessage(BOOTSTRAP_PROMPT);
     while (true) {
       const next = await nextInput();
       if (next === null) return;
@@ -192,7 +178,7 @@ async function main(): Promise<void> {
   // agent runs. Logs in with email + OTP if needed; a pending Terms gate is
   // reported as a manual step (the kit never accepts the Terms for the user).
   await ensureSession({ ask, log, bold });
-  await refreshBalance();
+  await balance.refresh();
 
   log('invoking agent ...');
   chat.setStatus('working…');
@@ -218,7 +204,7 @@ async function main(): Promise<void> {
     } else if (msg.type === 'result') {
       printResult(msg);
       chat.setStatus(null);
-      await refreshBalance();
+      balance.refreshSoon();
       // A blank line is a stray Enter, not an intent to quit: re-prompt without
       // feeding the input stream. `exit` (handled in `ask`) and `quit` still halt.
       let next = (await ask('> ')).trim();

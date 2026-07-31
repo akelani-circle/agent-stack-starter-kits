@@ -18,16 +18,12 @@
 
 import { HumanMessage } from '@langchain/core/messages';
 import { Command } from '@langchain/langgraph';
-import { createChatUi, withRetry, type ChatUi } from '@agent-stack-ecosystem-kits/agent-cli';
-import {
-  ensureSession,
-  formatUsdcBalance,
-  walletUsdcBalance,
-} from '@agent-stack-ecosystem-kits/circle-tools';
+import { createChatUi, withRetry, type ChatUi } from '@agent-stack-starter-kits/agent-cli';
+import { ensureSession, type AskFn } from '@agent-stack-starter-kits/circle-tools';
 
+import { BOOTSTRAP_PROMPT, createBalanceReadout } from '@agent-stack-starter-kits/kit-core';
 import { buildAgent } from './agent';
 import { loadConfig } from './config';
-import { SETUP_SKILL_URL } from './skill';
 import { bold, colorizeJson, dim, green, heading, kitLine, red, yellow } from './theme';
 
 // The chat UI pins the input to the bottom while logs scroll above it. It is
@@ -49,16 +45,9 @@ function out(line: string): void {
   else console.log(line);
 }
 
-/** Refresh the pinned USDC balance readout. Best-effort: a balance read must
- * never break the session (e.g. before a wallet exists, or on an RPC blip). */
-async function refreshBalance(): Promise<void> {
-  try {
-    const summary = await walletUsdcBalance();
-    ui?.setBalance(summary ? formatUsdcBalance(summary) : null);
-  } catch {
-    // Leave the last shown balance in place.
-  }
-}
+// The pinned USDC readout, shared by every kit (see kit-core/balance). `ui` is
+// passed as a getter because it only exists once main() creates the chat UI.
+const balance = createBalanceReadout(() => ui);
 
 /** A tool call the agent paused on, awaiting human review. Shape is loose
  * because deepagents may nest the tool name/args under `action`. */
@@ -198,10 +187,8 @@ async function main(): Promise<void> {
   log(`chain=BASE provider=${config.provider} model=${config.model}`);
   log(dim('tip: type "exit" at any prompt to quit'));
 
-  // Brief's AGENT BOOTSTRAP PROMPT, verbatim. setup.md drives the first turn.
-  const userPrompt =
-    `Run curl -sL ${SETUP_SKILL_URL}, ` +
-    'and use the returned setup instructions to set up my agent wallet.';
+  // The marketplace's own bootstrap prompt. setup.md drives the first turn.
+  const userPrompt = BOOTSTRAP_PROMPT;
 
   // The checkpointer-backed agent needs a thread_id. The same config object is
   // reused on every resume AND on every chat turn, so conversation state held
@@ -211,9 +198,10 @@ async function main(): Promise<void> {
   // Every prompt (chat input, approval [y/N], email/OTP) flows through the same
   // pinned input box the chat UI renders at the bottom of the terminal.
   // `exit` typed at ANY prompt halts the demo immediately, tearing down the UI
-  // (which restores the console) before the answer reaches the caller.
-  const ask = async (q: string): Promise<string> => {
-    const answer = await chat.ask(q);
+  // (which restores the console) before the answer reaches the caller. Options
+  // (e.g. the OTP prompt's `echo: false`) pass straight through to the UI.
+  const ask: AskFn = async (q, options) => {
+    const answer = await chat.ask(q, options);
     if (answer.trim().toLowerCase() === 'exit') {
       log('exit, halting.');
       chat.close();
@@ -226,7 +214,7 @@ async function main(): Promise<void> {
   // runs. Logs in with email + OTP if needed; a pending Terms gate is reported
   // as a manual step (the kit never accepts the Terms for the user).
   await ensureSession({ ask, log, bold });
-  await refreshBalance();
+  await balance.refresh();
 
   // Built after `ask` exists: the agent's circle_login tool prompts for email +
   // OTP through it to recover a logged-out session mid-conversation.
@@ -250,7 +238,7 @@ async function main(): Promise<void> {
       const result = await runTurn(agent, input, runConfig, ask);
       chat.setStatus(null);
       printFinal(result);
-      await refreshBalance();
+      balance.refreshSoon();
     }
 
     const next = (await ask('> ')).trim();

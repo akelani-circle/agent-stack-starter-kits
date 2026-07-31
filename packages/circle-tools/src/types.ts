@@ -36,12 +36,34 @@ export interface Service {
   url: string;
   name: string;
   description?: string;
+  /**
+   * Price on `chain`, e.g. "0.03 USDC". Quoted for the chain the kit would
+   * actually settle on, not merely the seller's first-listed option, so a
+   * listing that leads with a network the kit cannot pay still shows a price the
+   * caller can act on.
+   */
   price?: string;
+  /** Chain `price` is quoted on, when the seller offers one the kit supports. */
+  chain?: Chain;
+  /**
+   * HTTP method the service expects, when the marketplace publishes it. Present
+   * on search results so a caller that pays without a separate inspect still
+   * sends the input the way the service reads it.
+   */
+  method?: string;
 }
 
 export interface ServiceInspection extends Service {
   schema?: unknown;
-  health?: 'healthy' | 'degraded' | 'down' | string;
+  health?: 'payable' | 'healthy' | 'degraded' | 'down' | string;
+  /**
+   * Status the marketplace saw when it last probed the endpoint. `402` is a
+   * healthy paid resource; `5xx` means the seller was failing at probe time, so
+   * paying is very likely to buy an error.
+   */
+  httpStatus?: number;
+  /** Price in whole USDC, for comparing against a wallet balance before paying. */
+  priceUsdc?: number;
   /**
    * HTTP method the service expects (GET, POST, ...). A GET service reads its
    * input from the URL query string; a POST/PUT/PATCH service reads it from the

@@ -24,17 +24,13 @@ import {
   withRetry,
   isRetryableError,
   type ChatUi,
-} from '@agent-stack-ecosystem-kits/agent-cli';
-import {
-  ensureSession,
-  formatUsdcBalance,
-  walletUsdcBalance,
-} from '@agent-stack-ecosystem-kits/circle-tools';
+} from '@agent-stack-starter-kits/agent-cli';
+import { ensureSession, type AskFn } from '@agent-stack-starter-kits/circle-tools';
 import { loadConfig, type KitConfig } from './config';
 import { runTurn } from './agent';
 import { buildTools, type CircleTools } from './tools';
 import { isQuotaExhausted } from './retry';
-import { SETUP_SKILL_URL } from './skill';
+import { BOOTSTRAP_PROMPT, createBalanceReadout } from '@agent-stack-starter-kits/kit-core';
 import { bold, dim, kitLine, red, yellow } from './theme';
 
 // The chat UI pins the input to the bottom while logs scroll above it. It is
@@ -50,16 +46,9 @@ function log(line: string): void {
   else console.log(formatted);
 }
 
-/** Refresh the pinned USDC balance readout. Best-effort: a balance read must
- * never break the session (e.g. before a wallet exists, or on an RPC blip). */
-async function refreshBalance(): Promise<void> {
-  try {
-    const summary = await walletUsdcBalance();
-    ui?.setBalance(summary ? formatUsdcBalance(summary) : null);
-  } catch {
-    // Leave the last shown balance in place.
-  }
-}
+// The pinned USDC readout, shared by every kit (see kit-core/balance). `ui` is
+// passed as a getter because it only exists once main() creates the chat UI.
+const balance = createBalanceReadout(() => ui);
 
 /**
  * Run one conversation turn, falling back to the secondary provider if the
@@ -104,8 +93,8 @@ async function main(): Promise<void> {
 
   // Shared `ask` that routes every prompt through the pinned input box and
   // supports the "exit" escape hatch at any point (auth, approval, follow-up).
-  const ask = async (question: string): Promise<string> => {
-    const answer = await chat.ask(question);
+  const ask: AskFn = async (question, options) => {
+    const answer = await chat.ask(question, options);
     if (answer.trim().toLowerCase() === 'exit') {
       log('exit, halting.');
       chat.close();
@@ -124,19 +113,16 @@ async function main(): Promise<void> {
     // Check the Circle CLI session before running the agent. Logs in with email
     // + OTP if needed; never auto-accepts Circle Terms of Use.
     await ensureSession({ ask, log, bold });
-    await refreshBalance();
+    await balance.refresh();
 
     // ── Bootstrap ─────────────────────────────────────────────────────────────
     // The first turn is driven by the Circle setup skill, not a system prompt.
-    const bootstrapPrompt =
-      `Run curl -sL ${SETUP_SKILL_URL}, ` +
-      'and use the returned setup instructions to set up my agent wallet.';
-
+    //
     // Conversation history — the running CoreMessage[] that grows each turn.
     // Vercel AI SDK's `generateText` is stateless: we own the history and pass
     // it back on every call. `result.response.messages` gives us all the
     // assistant + tool-result messages the SDK generated so we can append them.
-    let messages: CoreMessage[] = [{ role: 'user', content: bootstrapPrompt }];
+    let messages: CoreMessage[] = [{ role: 'user', content: BOOTSTRAP_PROMPT }];
 
     // Build the tool set — `ask` is passed in so the two spend tools can pause
     // and prompt for human approval before touching USDC. This is the Vercel AI
@@ -147,7 +133,7 @@ async function main(): Promise<void> {
     chat.setStatus('working…');
     const { responseMessages } = await runAgentTurn(config, messages, tools);
     chat.setStatus(null);
-    await refreshBalance();
+    balance.refreshSoon();
     messages = [...messages, ...responseMessages];
 
     // ── REPL ──────────────────────────────────────────────────────────────────
@@ -170,7 +156,7 @@ async function main(): Promise<void> {
       chat.setStatus('working…');
       const { responseMessages: nextMessages } = await runAgentTurn(config, messages, tools);
       chat.setStatus(null);
-      await refreshBalance();
+      balance.refreshSoon();
       messages = [...messages, ...nextMessages];
     }
   } catch (err: unknown) {

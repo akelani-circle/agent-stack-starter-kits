@@ -33,16 +33,20 @@ import {
   circleInspectService,
   circlePayService,
   circleGatewayDeposit,
-  callFreeService,
   buildAuthTools,
+  type AskFn,
 } from './tools';
 
-export function buildAgent(config: KitConfig, ask: (q: string) => Promise<string>): Agent {
+/**
+ * Build the OpenAI Agents SDK agent for the Autonomous Payment Agent demo.
+ *
+ * No `instructions` are set, and none are needed: the SDK leaves the system
+ * prompt empty when the field is omitted. Everything the agent is told to do
+ * arrives at runtime from the Circle marketplace's own skill markdown, which
+ * the bootstrap prompt fetches on the first turn.
+ */
+export function buildAgent(config: KitConfig, ask: AskFn): Agent {
   const { loginTool, logoutTool } = buildAuthTools(ask);
-  // No hand-written system prompt: like the langchain, claude-agent-sdk, and
-  // google-adk kits, the bootstrap prompt plus setup.md drive the flow. The
-  // agent sets up the wallet and then waits for the user to ask for a service,
-  // instead of scripting a discover-then-pay sequence on its own.
   return new Agent({
     name: 'Circle Payment Agent',
     model: config.model,
@@ -63,7 +67,6 @@ export function buildAgent(config: KitConfig, ask: (q: string) => Promise<string
       circleInspectService,
       circlePayService,
       circleGatewayDeposit,
-      callFreeService,
     ],
   });
 }

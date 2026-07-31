@@ -20,10 +20,11 @@ import { ChatAnthropic } from '@langchain/anthropic';
 import { MemorySaver } from '@langchain/langgraph';
 import { ChatOpenAI } from '@langchain/openai';
 import { createDeepAgent } from 'deepagents';
+import { SPEND_TOOL_NAMES } from '@agent-stack-starter-kits/kit-core';
 
 import type { KitConfig } from './config';
 import { kitLine, yellow } from './theme';
-import { buildTools } from './tools';
+import { buildTools, type AskFn } from './tools';
 
 const MAX_RETRIES = 4;
 
@@ -54,17 +55,7 @@ function makeOnFailedAttempt() {
   };
 }
 
-/**
- * Tools the agent must NOT run without human approval. circle_pay_service and
- * circle_gateway_deposit are the two tools that move USDC, so both are gated
- * here. Read-only tools (skill fetch, wallet list/balance, gateway balance,
- * service search/inspect) and circle_deploy_wallet (a zero-value, gas-abstracted
- * SCA bootstrap that spends nothing) are intentionally absent, so the agent runs
- * them without a pause. Keyed by tool name, matching `interruptOn` below.
- */
-const INTERRUPT_TOOLS = ['circle_pay_service', 'circle_gateway_deposit'] as const;
-
-export function buildAgent(config: KitConfig, ask: (q: string) => Promise<string>) {
+export function buildAgent(config: KitConfig, ask: AskFn) {
   const tools = buildTools(ask);
   // maxRetries bounds the backoff so a sustained outage fails with a clear error
   // instead of hanging; onFailedAttempt makes each retry visible.
@@ -81,7 +72,11 @@ export function buildAgent(config: KitConfig, ask: (q: string) => Promise<string
     // interruptOn is per-tool (granular) rather than interrupting every tool
     // call. A checkpointer is required to persist agent state across the
     // pause/resume cycle; src/index.ts drives the resume loop.
-    interruptOn: Object.fromEntries(INTERRUPT_TOOLS.map((name) => [name, true])),
+    // SPEND_TOOL_NAMES is the shared list of the two USDC-moving tools. Every
+    // other tool — skill fetch, wallet list/balance, gateway balance, service
+    // search/inspect, and circle_deploy_wallet (a zero-value, gas-abstracted
+    // bootstrap that spends nothing) — runs without a pause.
+    interruptOn: Object.fromEntries(SPEND_TOOL_NAMES.map((name) => [name, true])),
     checkpointer: new MemorySaver(),
   });
 }

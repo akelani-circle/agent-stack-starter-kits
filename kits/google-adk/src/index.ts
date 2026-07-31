@@ -18,16 +18,12 @@
 
 import { InMemoryRunner, isFinalResponse, LogLevel, setLogLevel, type Event } from '@google/adk';
 import type { Content } from '@google/genai';
-import { createChatUi, type ChatUi } from '@agent-stack-ecosystem-kits/agent-cli';
-import {
-  ensureSession,
-  formatUsdcBalance,
-  walletUsdcBalance,
-} from '@agent-stack-ecosystem-kits/circle-tools';
+import { createChatUi, type ChatUi } from '@agent-stack-starter-kits/agent-cli';
+import { ensureSession, type AskFn } from '@agent-stack-starter-kits/circle-tools';
 
+import { BOOTSTRAP_PROMPT, createBalanceReadout } from '@agent-stack-starter-kits/kit-core';
 import { buildAgent, type ApprovalFn } from './agent';
 import { loadConfig } from './config';
-import { SETUP_SKILL_URL } from './skill';
 import { bold, colorizeJson, dim, green, heading, kitLine, red, yellow } from './theme';
 
 const APP_NAME = 'circle-payment-agent';
@@ -57,16 +53,9 @@ function out(line: string): void {
   else console.log(line);
 }
 
-/** Refresh the pinned USDC balance readout. Best-effort: a balance read must
- * never break the session (e.g. before a wallet exists, or on an RPC blip). */
-async function refreshBalance(): Promise<void> {
-  try {
-    const summary = await walletUsdcBalance();
-    ui?.setBalance(summary ? formatUsdcBalance(summary) : null);
-  } catch {
-    // Leave the last shown balance in place.
-  }
-}
+// The pinned USDC readout, shared by every kit (see kit-core/balance). `ui` is
+// passed as a getter because it only exists once main() creates the chat UI.
+const balance = createBalanceReadout(() => ui);
 
 /**
  * Pull the agent's prose out of an event: text parts only, with any reasoning
@@ -100,8 +89,8 @@ async function main(): Promise<void> {
   // pinned input box the chat UI renders at the bottom of the terminal.
   // `exit` typed at ANY prompt halts the demo immediately, tearing down the UI
   // (which restores the console) before the answer reaches the caller.
-  const ask = async (q: string): Promise<string> => {
-    const answer = await chat.ask(q);
+  const ask: AskFn = async (q, options) => {
+    const answer = await chat.ask(q, options);
     if (answer.trim().toLowerCase() === 'exit') {
       log('exit, halting.');
       chat.close();
@@ -125,16 +114,13 @@ async function main(): Promise<void> {
   const agent = buildAgent(config, approve, ask);
   const runner = new InMemoryRunner({ agent, appName: APP_NAME });
 
-  // Brief's AGENT BOOTSTRAP PROMPT, verbatim. setup.md drives the first turn.
-  const bootstrapPrompt =
-    `Run curl -sL ${SETUP_SKILL_URL}, ` +
-    'and use the returned setup instructions to set up my agent wallet.';
+  // The marketplace's own bootstrap prompt. setup.md drives the first turn.
 
   // Inline auth: ensure the Circle CLI has a valid agent session before the
   // agent runs. Logs in with email + OTP if needed; a pending Terms gate is
   // reported as a manual step (the kit never accepts the Terms for the user).
   await ensureSession({ ask, log, bold });
-  await refreshBalance();
+  await balance.refresh();
 
   // One session for the whole conversation: the InMemorySessionService is the
   // ADK-native checkpointer, so the agent keeps full context across the
@@ -147,7 +133,7 @@ async function main(): Promise<void> {
   log('invoking agent ...');
   // `null` means "no new turn to run" — used for the blank-line re-prompt so we
   // never re-invoke the agent without a fresh user message.
-  let input: Content | null = userMessage(bootstrapPrompt);
+  let input: Content | null = userMessage(BOOTSTRAP_PROMPT);
 
   while (true) {
     if (input) {
@@ -177,7 +163,7 @@ async function main(): Promise<void> {
         out(`\n${heading('-------------------')}`);
       }
       chat.setStatus(null);
-      await refreshBalance();
+      balance.refreshSoon();
     }
 
     const next = (await ask('> ')).trim();

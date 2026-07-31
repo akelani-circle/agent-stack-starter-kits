@@ -16,14 +16,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-/**
- * This kit's view of the shared terminal theme. The only per-kit part is the
- * tag on framework log lines; everything else comes from kit-core unchanged.
- */
-
-import { makeKitLine } from '@agent-stack-starter-kits/kit-core/theme';
-
-export * from '@agent-stack-starter-kits/kit-core/theme';
-
-/** Colorize one `[mastra-kit]` framework log line. */
-export const kitLine = makeKitLine('mastra-kit');
+export * from './balance';
+export * from './skill';
+export * from './theme';
+export * from './tools';

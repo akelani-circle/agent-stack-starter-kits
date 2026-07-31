@@ -18,60 +18,23 @@
 
 import { Agent } from '@mastra/core/agent';
 import type { KitConfig } from './config';
-import {
-  fetchSetupSkillTool,
-  fetchSubSkillTool,
-  circleCreateWallet,
-  circleListWallets,
-  circleGetBalance,
-  circleWalletFund,
-  fetchServiceTool,
-  circleDeployWallet,
-  fundFiatTool,
-  circleGetGatewayBalance,
-  circleSearchServices,
-  circleInspectService,
-  circlePayService,
-  circleGatewayDeposit,
-  callFreeService,
-  buildAuthTools,
-} from './tools';
+import { buildTools, type AskFn } from './tools';
 
-export function buildAgent(config: KitConfig, ask: (q: string) => Promise<string>): Agent {
-  const { loginTool, logoutTool } = buildAuthTools(ask);
+/**
+ * Build the Mastra agent for the Autonomous Payment Agent demo.
+ *
+ * Like every kit here it ships no authored instructions. `instructions` is a
+ * required field on Mastra's `Agent`, so it is set empty rather than filled
+ * with guidance of our own: everything the agent is told to do arrives at
+ * runtime from the Circle marketplace's own skill markdown, which the bootstrap
+ * prompt fetches on the first turn.
+ */
+export function buildAgent(config: KitConfig, ask: AskFn): Agent {
   return new Agent({
     id: 'circle-payment-agent',
     name: 'Circle Payment Agent',
-    // Mastra requires an `instructions` string, so unlike the kits whose
-    // framework lets it be omitted entirely, this is a minimal neutral prompt.
-    // It never scripts a discover-then-pay sequence: the bootstrap prompt and
-    // setup.md drive the flow, and the agent waits for the user to ask for a
-    // service rather than searching and paying on its own.
-    instructions: [
-      'You are an agent for the Circle Agent Stack.',
-      'Use your tools to do what the user asks; never just describe steps.',
-      'When bootstrapping, follow the fetched setup skill instructions.',
-      'After each tool call, briefly explain what happened and what it means for the developer.',
-    ].join(' '),
+    instructions: '',
     model: config.model,
-    tools: {
-      loginTool,
-      logoutTool,
-      fetchSetupSkillTool,
-      fetchSubSkillTool,
-      circleCreateWallet,
-      circleListWallets,
-      circleGetBalance,
-      circleWalletFund,
-      fetchServiceTool,
-      circleDeployWallet,
-      fundFiatTool,
-      circleGetGatewayBalance,
-      circleSearchServices,
-      circleInspectService,
-      circlePayService,
-      circleGatewayDeposit,
-      callFreeService,
-    },
+    tools: buildTools(ask),
   });
 }

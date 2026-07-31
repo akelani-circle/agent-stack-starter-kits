@@ -50,6 +50,17 @@ export interface DeployWalletInput {
   chain?: Chain;
 }
 
+/** How `circle wallet fund` sources the testnet USDC. */
+export type FundMethod = 'crypto' | 'fiat';
+
+export interface FundWalletInput {
+  address: string;
+  /** `crypto` draws from the testnet faucet, `fiat` runs the test card flow. Defaults to `crypto`. */
+  method?: FundMethod;
+  /** Chain to fund on. Defaults to Base. */
+  chain?: Chain;
+}
+
 /** Tokens the fiat on-ramp can buy. `usdc` is the default. */
 export type FundToken = 'usdc' | 'eurc' | 'eth' | 'native';
 
@@ -131,7 +142,14 @@ function unwrap<T>(raw: { data?: T } | T): T {
 
 /** Creates a new agent-controlled wallet on Base via `circle wallet create`. */
 export async function createWallet(): Promise<AgentWallet> {
-  const out = runCircle(['wallet', 'create', '--chain', WALLET_LIST_CHAIN, '--output', 'json']);
+  const out = await runCircle([
+    'wallet',
+    'create',
+    '--chain',
+    WALLET_LIST_CHAIN,
+    '--output',
+    'json',
+  ]);
   const trimmed = out.trim();
   let address: string | undefined;
   try {
@@ -148,12 +166,14 @@ export async function createWallet(): Promise<AgentWallet> {
   if (!address) {
     throw new Error(`circle wallet create returned no address. Raw output:\n${out}`);
   }
+  // A new wallet changes what a summary should consider, so the next one rescans.
+  invalidateWalletPick();
   return { address };
 }
 
 /** `circle wallet list --chain BASE --type agent --output json` */
 export async function listWallets(): Promise<AgentWallet[]> {
-  const raw = runCircleJson<CircleEnvelope<RawWalletList>>(
+  const raw = await runCircleJson<CircleEnvelope<RawWalletList>>(
     ['wallet', 'list', '--chain', WALLET_LIST_CHAIN, '--type', 'agent', '--output', 'json'],
     { retries: READ_RETRIES },
   );
@@ -161,9 +181,31 @@ export async function listWallets(): Promise<AgentWallet[]> {
   return list.map((w) => ({ address: w.address }));
 }
 
+/**
+ * `circle wallet fund --address <addr> --chain <chain> --method <method>`
+ *
+ * Testnet funding. The CLI's output is handed back verbatim rather than parsed:
+ * it differs by method (the faucet reports a transfer, the test card flow
+ * reports a checkout), and neither shape is stable enough to normalise.
+ */
+export async function fundWallet(input: FundWalletInput): Promise<string> {
+  return runCircle([
+    'wallet',
+    'fund',
+    '--address',
+    input.address,
+    '--chain',
+    chainCli(input.chain ?? DEFAULT_CHAIN),
+    '--method',
+    input.method ?? 'crypto',
+    '--output',
+    'json',
+  ]);
+}
+
 /** `circle wallet balance --address <addr> --chain <chain> --output json` */
 export async function getBalance(input: GetBalanceInput): Promise<WalletBalance> {
-  const raw = runCircleJson<CircleEnvelope<RawBalance>>(
+  const raw = await runCircleJson<CircleEnvelope<RawBalance>>(
     [
       'wallet',
       'balance',
@@ -194,6 +236,25 @@ export interface UsdcBalanceSummary {
   chain: Chain;
 }
 
+/**
+ * How long the chosen wallet is reused before the next summary rescans them all.
+ * Bounds how stale the pick can get when funds land in a *different* wallet.
+ */
+const WALLET_PICK_TTL_MS = 60_000;
+
+/** The wallet the last summary settled on, reused to keep the refresh cheap. */
+let walletPick: { address: string; chain: Chain; at: number } | null = null;
+
+/**
+ * Forget the cached wallet pick, forcing the next summary to rescan.
+ *
+ * Called wherever the set of wallets changes under us. Cheap to call: the cost
+ * is one extra `wallet list` on the following refresh.
+ */
+export function invalidateWalletPick(): void {
+  walletPick = null;
+}
+
 /** Read a wallet's USDC amount, treating any failure as "0" so one bad RPC
  * read never sinks the whole summary. */
 async function usdcAmountOf(address: string, chain: Chain): Promise<string> {
@@ -214,10 +275,28 @@ async function usdcAmountOf(address: string, chain: Chain): Promise<string> {
  * before setup) so a caller can simply hide the readout. Best-effort: a caller
  * should treat a throw as "unknown" and never break the session over a balance
  * read.
+ *
+ * The full scan costs one `wallet list` plus one `wallet balance` per wallet,
+ * and every CLI call is a process spawn and a network round trip — a cost paid
+ * on each refresh, i.e. after every agent turn. So the wallet it settles on is
+ * remembered and re-read on its own for `WALLET_PICK_TTL_MS`, which is the
+ * common case (funds stay in the wallet the agent spends from) and costs a
+ * single call. The scan returns whenever the pick expires, reads empty, or is
+ * invalidated, so a wrong pick corrects itself rather than sticking.
  */
 export async function walletUsdcBalance(
   chain: Chain = DEFAULT_CHAIN,
 ): Promise<UsdcBalanceSummary | null> {
+  const cached = walletPick;
+  if (cached && cached.chain === chain && Date.now() - cached.at < WALLET_PICK_TTL_MS) {
+    const usdc = await usdcAmountOf(cached.address, chain);
+    // Zero reads as "this may no longer be the wallet worth showing" — funds
+    // could have landed in another one — so it falls through to a full scan,
+    // which costs exactly what the old unconditional scan did.
+    if (Number(usdc) > 0) return { address: cached.address, usdc, chain };
+    walletPick = null;
+  }
+
   const wallets = await listWallets();
   if (wallets.length === 0) return null;
   const balances = await Promise.all(
@@ -228,6 +307,7 @@ export async function walletUsdcBalance(
   const chosen = balances.reduce((best, cur) =>
     Number(cur.usdc) > Number(best.usdc) ? cur : best,
   );
+  walletPick = { address: chosen.address, chain, at: Date.now() };
   return { address: chosen.address, usdc: chosen.usdc, chain };
 }
 
@@ -264,7 +344,7 @@ export async function fundWalletFiat(input: FundFiatInput): Promise<FundFiatResu
 
   // `--no-open` prints the Transak URL rather than opening a browser; `--method
   // fiat` and `--amount` are both required in non-interactive (agent) use.
-  const out = runCircle([
+  const out = await runCircle([
     'wallet',
     'fund',
     '--address',
@@ -377,7 +457,7 @@ export async function deployWallet(input: DeployWalletInput): Promise<DeployWall
 
   // Zero-value self-transfer. Mutating, so runCircle keeps retries at 0 (default)
   // so a dropped connection never double-sends.
-  const out = runCircle([
+  const out = await runCircle([
     'wallet',
     'transfer',
     address,

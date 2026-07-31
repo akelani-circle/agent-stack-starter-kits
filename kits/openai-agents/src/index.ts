@@ -20,12 +20,9 @@ import 'dotenv/config';
 import { createInterface } from 'node:readline/promises';
 import { run, user } from '@openai/agents';
 import type { Agent, RunResult } from '@openai/agents';
-import { createChatUi, withRetry, type ChatUi } from '@agent-stack-ecosystem-kits/agent-cli';
-import {
-  ensureSession,
-  formatUsdcBalance,
-  walletUsdcBalance,
-} from '@agent-stack-ecosystem-kits/circle-tools';
+import { createChatUi, withRetry, type ChatUi } from '@agent-stack-starter-kits/agent-cli';
+import { ensureSession, type AskOptions } from '@agent-stack-starter-kits/circle-tools';
+import { BOOTSTRAP_PROMPT, createBalanceReadout } from '@agent-stack-starter-kits/kit-core';
 import { buildAgent } from './agent';
 import { loadConfig } from './config';
 import { bold, kitLine } from './theme';
@@ -49,19 +46,12 @@ function out(line: string): void {
   else console.log(line);
 }
 
-/** Refresh the pinned USDC balance readout. Best-effort: a balance read must
- * never break the session (e.g. before a wallet exists, or on an RPC blip). */
-async function refreshBalance(): Promise<void> {
-  try {
-    const summary = await walletUsdcBalance();
-    ui?.setBalance(summary ? formatUsdcBalance(summary) : null);
-  } catch {
-    // Leave the last shown balance in place.
-  }
-}
+// The pinned USDC readout, shared by every kit (see kit-core/balance). `ui` is
+// passed as a getter because it only exists once main() creates the chat UI.
+const balance = createBalanceReadout(() => ui);
 
-async function ask(question: string): Promise<string> {
-  if (ui) return (await ui.ask(question)).trim();
+async function ask(question: string, options?: AskOptions): Promise<string> {
+  if (ui) return (await ui.ask(question, options)).trim();
   const rl = createInterface({ input: process.stdin, output: process.stdout });
   try {
     return (await rl.question(question)).trim();
@@ -81,18 +71,20 @@ async function main(): Promise<void> {
   log(`chain=${config.chain} model=${config.model}`);
 
   await ensureSession({ ask, log, bold });
-  await refreshBalance();
+  await balance.refresh();
 
   const agent = buildAgent(config, ask);
-  const prompt = 'Run curl -sL https://agents.circle.com/skills/setup.md, and use the returned setup instructions to set up my agent wallet.';
-  log(`prompt: ${prompt}`);
+  log(`prompt: ${BOOTSTRAP_PROMPT}`);
   log('running agent...');
 
   chat.setStatus('working…');
-  let result = await withRetry((signal) => run(agent, prompt, { signal }), { label: 'agent', log });
+  let result = await withRetry((signal) => run(agent, BOOTSTRAP_PROMPT, { signal }), {
+    label: 'agent',
+    log,
+  });
   result = await resolveInterruptions(result, agent);
   chat.setStatus(null);
-  await refreshBalance();
+  balance.refreshSoon();
   out(result.finalOutput ?? '(no output)');
 
   log('continue the conversation — type "exit" to quit');
@@ -108,7 +100,7 @@ async function main(): Promise<void> {
     });
     result = await resolveInterruptions(result, agent);
     chat.setStatus(null);
-    await refreshBalance();
+    balance.refreshSoon();
     out('\n' + (result.finalOutput ?? '(no output)') + '\n');
   }
 

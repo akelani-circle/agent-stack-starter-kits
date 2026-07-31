@@ -18,19 +18,13 @@
 
 import 'dotenv/config';
 import { createInterface } from 'node:readline/promises';
-import { createChatUi, withRetry, type ChatUi } from '@agent-stack-ecosystem-kits/agent-cli';
-import {
-  ensureSession,
-  formatUsdcBalance,
-  walletUsdcBalance,
-} from '@agent-stack-ecosystem-kits/circle-tools';
+import { createChatUi, withRetry, type ChatUi } from '@agent-stack-starter-kits/agent-cli';
+import { ensureSession, type AskOptions } from '@agent-stack-starter-kits/circle-tools';
+import { BOOTSTRAP_PROMPT, createBalanceReadout } from '@agent-stack-starter-kits/kit-core';
 import { onboardingWorkflow } from './workflow';
 import { buildAgent } from './agent';
 import { loadConfig } from './config';
 import { bold, kitLine } from './theme';
-
-const INITIAL_PROMPT =
-  'Run curl -sL https://agents.circle.com/skills/setup.md, and use the returned setup instructions to set up my agent wallet.';
 
 // The chat UI pins the input to the bottom while logs scroll above it. It is
 // created in main(); the module-level handle lets the fatal handler close it
@@ -51,19 +45,12 @@ function out(line: string): void {
   else console.log(line);
 }
 
-/** Refresh the pinned USDC balance readout. Best-effort: a balance read must
- * never break the session (e.g. before a wallet exists, or on an RPC blip). */
-async function refreshBalance(): Promise<void> {
-  try {
-    const summary = await walletUsdcBalance();
-    ui?.setBalance(summary ? formatUsdcBalance(summary) : null);
-  } catch {
-    // Leave the last shown balance in place.
-  }
-}
+// The pinned USDC readout, shared by every kit (see kit-core/balance). `ui` is
+// passed as a getter because it only exists once main() creates the chat UI.
+const balance = createBalanceReadout(() => ui);
 
-async function ask(question: string): Promise<string> {
-  if (ui) return (await ui.ask(question)).trim();
+async function ask(question: string, options?: AskOptions): Promise<string> {
+  if (ui) return (await ui.ask(question, options)).trim();
   const rl = createInterface({ input: process.stdin, output: process.stdout });
   try {
     return (await rl.question(question)).trim();
@@ -83,12 +70,17 @@ async function main(): Promise<void> {
   log(`chain=${config.chain} provider=${config.provider} model=${config.model}`);
 
   await ensureSession({ ask, log, bold });
-  await refreshBalance();
+  await balance.refresh();
 
   chat.setStatus('working…');
   const run = await onboardingWorkflow.createRun();
   let result = await run.start({ inputData: {} });
 
+  // Generic resume driver: no shipped step suspends (login is handled up front
+  // by `ensureSession`), but any human-in-the-loop step added to the workflow
+  // gets prompted through the chat UI without touching this file. A suspending
+  // step must `suspend(...)` and then return immediately — on resume Mastra
+  // re-executes it from the top with `resumeData` set.
   while (result.status === 'suspended') {
     const suspendedEntry = Object.entries(result.steps).find(([, s]) => s.status === 'suspended');
     if (!suspendedEntry) break;
@@ -113,12 +105,12 @@ async function main(): Promise<void> {
     (result as any).steps?.agent?.output?.summary ??
     '(no output)';
   out(summary);
-  await refreshBalance();
+  balance.refreshSoon();
 
   log('continue the conversation — type "exit" to quit');
   const agent = buildAgent(config, ask);
   const messages: Array<{ role: 'user'; content: string } | { role: 'assistant'; content: string }> = [
-    { role: 'user', content: INITIAL_PROMPT },
+    { role: 'user', content: BOOTSTRAP_PROMPT },
     { role: 'assistant', content: summary },
   ];
 
@@ -134,7 +126,7 @@ async function main(): Promise<void> {
       { label: 'agent', log },
     );
     chat.setStatus(null);
-    await refreshBalance();
+    balance.refreshSoon();
     const text = response.text ?? '(no output)';
     out('\n' + text + '\n');
     messages.push({ role: 'assistant', content: text });

@@ -25,6 +25,7 @@ import {
   fetchSubSkill,
   parsePayload,
   preview,
+  recordServiceSearch,
   selectDepositMethod,
   selectGatewayChain,
   selectPayChain,
@@ -267,6 +268,9 @@ export const circleSearchServices = tool({
     try {
       const result = await circle.searchServices({ keyword });
       log(`circle_search_services ← ${result.length} hit(s)`);
+      // Makes these hits addressable by number at the next prompt, exactly as
+      // if the user had run `/discover` themselves.
+      recordServiceSearch(result);
       return JSON.stringify(result);
     } catch (e) {
       log(`circle_search_services ✗ ${(e as Error).message}`);

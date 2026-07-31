@@ -40,6 +40,8 @@ export const TERMS_MESSAGE =
 export interface AskOptions {
   /** False keeps the answer out of the terminal transcript (secrets). */
   echo?: boolean;
+  /** Grey hint text shown in the input box while it's empty, e.g. a pointer to `/help`. */
+  placeholder?: string;
 }
 
 /**
@@ -168,6 +170,10 @@ async function runEmailOtpLogin(io: Required<InteractiveIo>): Promise<void> {
       const text = rawText(e);
       if (termsPending(text)) throw new Error(TERMS_MESSAGE);
       log(`login init failed: ${text}`);
+      // No "/help" hint here, or at any other prompt in this file: the slash
+      // commands are routed by the kit's chat loop, which does not exist yet —
+      // login runs before it, so "/help" typed here would be read as an email
+      // address. "exit" is handled inside `ask` itself and does work.
       log('check the address and re-enter it; type "exit" to quit');
       continue;
     }

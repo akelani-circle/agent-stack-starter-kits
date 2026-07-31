@@ -72,6 +72,31 @@ function isTransientFailure(detail: string): boolean {
   return TRANSIENT_ERROR_PATTERNS.some((p) => lower.includes(p));
 }
 
+/**
+ * Node's process warnings — `(node:1234) [DEP0040] DeprecationWarning: …` and the
+ * `(Use \`node --trace-deprecation …\`)` hint that follows — which the CLI's own
+ * dependencies emit on stderr at startup, on every run, success or failure.
+ */
+const NODE_WARNING_LINE = /^\(node:\d+\)|^\(Use `node /;
+
+/**
+ * Drop Node's own warnings from captured stderr.
+ *
+ * Failure messages are built from stderr, so those warnings were being prepended
+ * to every CLI error: the real cause ended up as the last line of a block whose
+ * first two lines are unrelated boilerplate, both for a human reading the log and
+ * for an agent reading the tool result. Only the noise lines are removed, and
+ * only from the text used to explain the failure — `CircleCliError.stderr` still
+ * carries the raw stream for anyone who wants it.
+ */
+function withoutNodeWarnings(stderr: string): string {
+  return stderr
+    .split('\n')
+    .filter((line) => !NODE_WARNING_LINE.test(line.trimStart()))
+    .join('\n')
+    .trim();
+}
+
 export class CircleCliError extends Error {
   constructor(
     message: string,
@@ -198,7 +223,8 @@ export async function runCircle(
       if (result.code === 0) return result.stdout;
       ({ stdout, stderr } = result);
       exitCode = result.code;
-      detail = stderr.trim() || stdout.trim() || `exited with code ${String(result.code)}`;
+      detail =
+        withoutNodeWarnings(stderr) || stdout.trim() || `exited with code ${String(result.code)}`;
     } catch (err) {
       // The process never ran (missing binary, output cap): no streams to read.
       detail = err instanceof Error ? err.message : String(err);

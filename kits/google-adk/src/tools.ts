@@ -25,6 +25,7 @@ import {
   fetchSubSkill,
   parsePayload,
   preview,
+  recordServiceSearch,
   selectDepositMethod,
   selectGatewayChain,
   selectPayChain,
@@ -119,7 +120,11 @@ const listAgentWallets = new FunctionTool({
     try {
       const result = await circle.listWallets();
       log(`circle_list_wallets ← ${result.length} wallet(s)`);
-      return ok(result);
+      // Wrapped, not a bare array: Gemini's `function_response.response` proto
+      // field is a Struct (object), not a repeating field, so replaying an
+      // array-shaped tool result back as conversation history 400s with
+      // "Proto field is not repeating, cannot start list" on the very next turn.
+      return ok({ wallets: result });
     } catch (e) {
       log(`circle_list_wallets ✗ ${(e as Error).message}`);
       return err(e);
@@ -221,7 +226,15 @@ const fundFiatTool = new FunctionTool({
   description: TOOL_DESCRIPTIONS.circle_fund_fiat,
   parameters: z.object({
     address: z.string().describe(PARAM_DESCRIPTIONS.address),
-    amount: z.number().positive().describe(PARAM_DESCRIPTIONS.fiatAmount),
+    // Not `.positive()`: zod's JSON-schema conversion renders that as a numeric
+    // `exclusiveMinimum`, which Gemini's function-calling schema parser rejects
+    // outright ("Unknown name exclusiveMinimum"), failing every turn before the
+    // agent runs at all. `.refine` validates the same constraint at runtime
+    // without emitting anything into the generated schema.
+    amount: z
+      .number()
+      .refine((v) => v > 0, 'amount must be greater than 0')
+      .describe(PARAM_DESCRIPTIONS.fiatAmount),
     chain: chainEnum.optional().describe(PARAM_DESCRIPTIONS.chain),
     token: z
       .enum(['usdc', 'eurc', 'eth', 'native'])
@@ -258,7 +271,12 @@ const searchServices = new FunctionTool({
     try {
       const result = await circle.searchServices({ keyword });
       log(`circle_search_services ← ${result.length} hit(s)`);
-      return ok(result);
+      // Makes these hits addressable by number at the next prompt, exactly as
+      // if the user had run `/discover` themselves.
+      recordServiceSearch(result);
+      // See the matching note on circle_list_wallets: a bare array response
+      // crashes the next turn against Gemini, so it's wrapped in an object.
+      return ok({ services: result });
     } catch (e) {
       log(`circle_search_services ✗ ${(e as Error).message}`);
       return err(e);
@@ -388,7 +406,13 @@ const gatewayDepositTool = new FunctionTool({
     url: z.string().describe(PARAM_DESCRIPTIONS.serviceUrl),
     address: z.string().describe(PARAM_DESCRIPTIONS.address),
     method: methodEnum.optional().describe(PARAM_DESCRIPTIONS.httpMethod),
-    amount: z.number().positive().describe(PARAM_DESCRIPTIONS.depositAmount),
+    // See the matching note on circle_fund_fiat's `amount` above: `.positive()`
+    // breaks Gemini's function-calling schema, so the constraint is a runtime
+    // refine instead.
+    amount: z
+      .number()
+      .refine((v) => v > 0, 'amount must be greater than 0')
+      .describe(PARAM_DESCRIPTIONS.depositAmount),
   }),
   execute: async ({ url, address, amount, method }) => {
     const httpMethod = (method ?? 'GET').toUpperCase();

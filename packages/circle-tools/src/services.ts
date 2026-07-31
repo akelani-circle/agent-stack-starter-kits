@@ -409,8 +409,16 @@ async function usdcOn(address: string, chain: Chain): Promise<number | null> {
   }
 }
 
-/** The cheapest price the seller quotes on a chain, in whole USDC. */
-function priceOn(accepts: ServiceAccepts, chain: Chain): number | null {
+/**
+ * The cheapest price the seller quotes on a chain, in whole USDC.
+ *
+ * Exported because this is the only authoritative price for a pending payment:
+ * it comes from the seller's live x402 challenge, on the chain the payment will
+ * actually settle on. Anything quoting a service from another source (a search
+ * listing, an inspect result) can disagree with what the wallet is about to be
+ * charged, which is not good enough for an approval prompt.
+ */
+export function priceOn(accepts: ServiceAccepts, chain: Chain): number | null {
   const amounts = accepts.options
     .filter((o) => o.chain === chain)
     .map((o) => atomicToUsdc(o.amountAtomic))
@@ -477,6 +485,44 @@ function paymentAlreadySubmitted(detail: string): boolean {
 }
 
 /**
+ * Transport failures that prove the CLI never reached the seller at all: name
+ * resolution failed, or the connection was refused outright. No request was sent,
+ * so no x402 payment was submitted and nothing was spent — these are the only
+ * transport errors a caller may safely retry as-is.
+ */
+const NEVER_CONNECTED_PATTERNS = ['enotfound', 'econnrefused', 'eai_again', 'getaddrinfo'];
+
+/**
+ * Transport failures that hit a connection which was already open. `terminated`
+ * is undici's error for a response body that ended early — the CLI's own request
+ * deadline aborting the fetch, or the seller dropping the socket mid-answer — and
+ * the rest are its siblings.
+ *
+ * These are ambiguous by construction and must be treated as possibly-charged:
+ * the CLI opens a connection to fetch the 402 challenge *and* to make the paid
+ * call, and the failure text says nothing about which one broke. Since x402
+ * submits payment before the upstream request resolves, a break during the second
+ * one means the USDC is gone with no response to show for it.
+ */
+const CONNECTION_LOST_PATTERNS = [
+  'terminated',
+  'socket hang up',
+  'econnreset',
+  'etimedout',
+  'timed out',
+  'aborted',
+  'headers timeout',
+  'body timeout',
+  'fetch failed',
+];
+
+function transportFailure(detail: string): 'never-connected' | 'connection-lost' | null {
+  if (NEVER_CONNECTED_PATTERNS.some((p) => detail.includes(p))) return 'never-connected';
+  if (CONNECTION_LOST_PATTERNS.some((p) => detail.includes(p))) return 'connection-lost';
+  return null;
+}
+
+/**
  * Translate a raw `circle services pay` failure into an actionable error.
  *
  * Two cases get rewritten:
@@ -516,7 +562,29 @@ function explainPayError(e: unknown, url: string): Error {
         `report this one as broken.\n\nUnderlying CLI error: ${message}`,
     );
   }
-  return e instanceof Error ? e : new Error(message);
+  switch (transportFailure(lower)) {
+    case 'never-connected':
+      return new Error(
+        `Could not reach ${url} at all: the connection was never established, so no request ` +
+          'was sent and NO PAYMENT WAS MADE. The host may be down or the URL wrong. Retrying ' +
+          'is safe; if it fails the same way again, choose a different service.\n\n' +
+          `Underlying CLI error: ${message}`,
+      );
+    case 'connection-lost':
+      return new Error(
+        `The connection to ${url} broke mid-request (the response ended early, or the ` +
+          `${PAY_TIMEOUT_SECONDS}s deadline aborted it). TREAT THIS AS ALREADY PAID: x402 ` +
+          'submits the USDC before the upstream request resolves, so the payment may well ' +
+          'have settled with the response lost on the way back. Do NOT retry this URL to ' +
+          'find out — that risks a second charge for the same call. Report the failure, ' +
+          'and note the wallet balance may have decreased. If the data is still needed, ' +
+          'either ask for a narrower request (a smaller limit or page size answers faster ' +
+          'and is less likely to time out) or use a different service.\n\n' +
+          `Underlying CLI error: ${message}`,
+      );
+    default:
+      return e instanceof Error ? e : new Error(message);
+  }
 }
 
 /**

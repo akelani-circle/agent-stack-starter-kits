@@ -21,10 +21,25 @@ import type { Content } from '@google/genai';
 import { createChatUi, type ChatUi } from '@agent-stack-starter-kits/agent-cli';
 import { ensureSession, type AskFn } from '@agent-stack-starter-kits/circle-tools';
 
-import { BOOTSTRAP_PROMPT, createBalanceReadout } from '@agent-stack-starter-kits/kit-core';
+import {
+  BOOTSTRAP_PROMPT,
+  createBalanceReadout,
+  createCommandRouter,
+  describeSpend,
+} from '@agent-stack-starter-kits/kit-core';
 import { buildAgent, type ApprovalFn } from './agent';
 import { loadConfig } from './config';
-import { bold, colorizeJson, dim, green, heading, kitLine, red, yellow } from './theme';
+import {
+  bold,
+  colorizeJson,
+  dim,
+  green,
+  heading,
+  humanizeLatexSymbols,
+  kitLine,
+  red,
+  yellow,
+} from './theme';
 
 const APP_NAME = 'circle-payment-agent';
 const USER_ID = 'demo-user';
@@ -104,6 +119,8 @@ async function main(): Promise<void> {
   // approval prompt; every other tool runs without a pause.
   const approve: ApprovalFn = async (toolName, args) => {
     log(yellow(`approval required for tool: ${bold(toolName)}`));
+    const summary = await describeSpend(toolName, args);
+    if (summary) out(summary);
     out(colorizeJson(args));
     const answer = (await ask(bold('Approve this action? [y/N] '))).trim().toLowerCase();
     const approved = answer === 'y' || answer === 'yes';
@@ -129,6 +146,10 @@ async function main(): Promise<void> {
     appName: APP_NAME,
     userId: USER_ID,
   });
+
+  // Handles "/balance", "/discover <keyword>", etc. (direct circle-tools calls,
+  // no model turn spent) and bare-number replies to a prior "/discover" list.
+  const commands = createCommandRouter({ log, out, refreshBalance: balance.refresh });
 
   log('invoking agent ...');
   // `null` means "no new turn to run" — used for the blank-line re-prompt so we
@@ -156,7 +177,7 @@ async function main(): Promise<void> {
           continue;
         }
         if (!isFinalResponse(event)) continue;
-        const text = extractText(event);
+        const text = humanizeLatexSymbols(extractText(event));
         if (!text) continue;
         out(`\n${heading('--- agent reply ---')}\n`);
         out(text);
@@ -166,14 +187,21 @@ async function main(): Promise<void> {
       balance.refreshSoon();
     }
 
-    const next = (await ask('> ')).trim();
+    const next = (await ask('> ', { placeholder: 'try "/help" for quick commands' })).trim();
     if (next.toLowerCase() === 'quit') {
       log('done.');
       break;
     }
     // A blank line is a stray Enter, not an intent to quit: re-prompt without
     // running a turn. `exit` (handled in `ask`) and `quit` still halt.
-    input = next ? userMessage(next) : null;
+    if (!next) {
+      input = null;
+      continue;
+    }
+    // "/command" and a bare number picking a prior "/discover" result are
+    // handled locally; everything else goes to the agent as a normal turn.
+    const outcome = await commands.run(next);
+    input = outcome.handled ? (outcome.forward ? userMessage(outcome.forward) : null) : userMessage(next);
   }
 
   // Unmount the UI (and restore the patched console) so the process can exit.

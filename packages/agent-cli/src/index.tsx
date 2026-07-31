@@ -58,6 +58,14 @@ export interface AskOptions {
    * the value is replaced by a mask so the code never lands in terminal history.
    */
   echo?: boolean;
+  /**
+   * Grey hint text shown inside the input box while it's empty (e.g. a pointer
+   * to `/help`). `ink-text-input` already dims placeholder text and swaps it
+   * out for whatever the user types, so this needs no separate "has the user
+   * typed yet" tracking. Omit for prompts where a hint would be noise (the
+   * approval y/N, login email/OTP).
+   */
+  placeholder?: string;
 }
 
 /** Imperative handle the kits drive; identical shape in TTY and non-TTY modes. */
@@ -101,6 +109,8 @@ interface Snapshot {
    */
   question: string | null;
   balance: string | null;
+  /** Idle-input hint from the current `ask()`'s `placeholder` option, or ''. */
+  placeholder: string;
 }
 
 interface Store {
@@ -152,7 +162,7 @@ function createInkUi(options: ChatUiOptions): ChatUi {
   const initialLogs: LogItem[] = options.title ? [{ id: 0, text: options.title }] : [];
   // Starts with no question pending: the kit is booting (config, session check,
   // first balance read), which is busy time and reads as such.
-  let snapshot: Snapshot = { logs: initialLogs, question: null, balance: null };
+  let snapshot: Snapshot = { logs: initialLogs, question: null, balance: null, placeholder: '' };
   let nextId = 1;
   const listeners = new Set<() => void>();
 
@@ -184,7 +194,7 @@ function createInkUi(options: ChatUiOptions): ChatUi {
       // Re-enabling the input is the one moment control returns to the user, so
       // this is also the moment the busy indicator stops — by construction now,
       // since both read the same field.
-      snapshot = { ...snapshot, question };
+      snapshot = { ...snapshot, question, placeholder: options.placeholder ?? '' };
       emit();
     });
   const submit = (value: string): void => {
@@ -318,7 +328,7 @@ function App({ store, onSubmit }: { store: Store; onSubmit: (value: string) => v
             onChange={setValue}
             onSubmit={handleSubmit}
             showCursor={!busy}
-            placeholder={busy ? `Working${'.'.repeat(dotFrame + 1)}` : ''}
+            placeholder={busy ? `Working${'.'.repeat(dotFrame + 1)}` : snap.placeholder}
           />
         </Box>
       </Box>

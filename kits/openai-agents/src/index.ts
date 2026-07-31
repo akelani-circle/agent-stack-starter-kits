@@ -22,10 +22,15 @@ import { run, user } from '@openai/agents';
 import type { Agent, RunResult } from '@openai/agents';
 import { createChatUi, withRetry, type ChatUi } from '@agent-stack-starter-kits/agent-cli';
 import { ensureSession, type AskOptions } from '@agent-stack-starter-kits/circle-tools';
-import { BOOTSTRAP_PROMPT, createBalanceReadout } from '@agent-stack-starter-kits/kit-core';
+import {
+  BOOTSTRAP_PROMPT,
+  createBalanceReadout,
+  createCommandRouter,
+  describeSpend,
+} from '@agent-stack-starter-kits/kit-core';
 import { buildAgent } from './agent';
 import { loadConfig } from './config';
-import { bold, kitLine } from './theme';
+import { bold, humanizeLatexSymbols, kitLine } from './theme';
 
 // The chat UI pins the input to the bottom while logs scroll above it. It is
 // created in main(); the module-level handle lets the fatal handler close it
@@ -85,23 +90,31 @@ async function main(): Promise<void> {
   result = await resolveInterruptions(result, agent);
   chat.setStatus(null);
   balance.refreshSoon();
-  out(result.finalOutput ?? '(no output)');
+  out(humanizeLatexSymbols(result.finalOutput ?? '(no output)'));
 
-  log('continue the conversation — type "exit" to quit');
+  // Handles "/balance", "/discover <keyword>", etc. (direct circle-tools calls,
+  // no model turn spent) and bare-number replies to a prior "/discover" list.
+  const commands = createCommandRouter({ log, out, refreshBalance: balance.refresh });
+
   while (true) {
-    const input = await ask('> ');
+    const input = await ask('> ', { placeholder: 'type "/help" for quick commands or "exit" to quit' });
     if (input.toLowerCase() === 'exit') break;
     // A blank line is a stray Enter, not an intent to quit: re-prompt.
     if (!input) continue;
+    // "/command" and a bare number picking a prior "/discover" result are
+    // handled locally; everything else goes to the agent as a normal turn.
+    const outcome = await commands.run(input);
+    if (outcome.handled && !outcome.forward) continue;
+    const turnInput = outcome.forward ?? input;
     chat.setStatus('working…');
-    result = await withRetry((signal) => run(agent, [...result.history, user(input)], { signal }), {
+    result = await withRetry((signal) => run(agent, [...result.history, user(turnInput)], { signal }), {
       label: 'agent',
       log,
     });
     result = await resolveInterruptions(result, agent);
     chat.setStatus(null);
     balance.refreshSoon();
-    out('\n' + (result.finalOutput ?? '(no output)') + '\n');
+    out('\n' + humanizeLatexSymbols(result.finalOutput ?? '(no output)') + '\n');
   }
 
   log('onboarding complete');
@@ -120,6 +133,8 @@ async function resolveInterruptions(
       const toolArgs = (() => { try { return JSON.parse(rawItem?.arguments ?? '{}'); } catch { return {}; } })();
 
       out(`\n[approval required] ${toolName}`);
+      const summary = await describeSpend(toolName, toolArgs);
+      if (summary) out(summary);
       out(JSON.stringify(toolArgs, null, 2));
 
       const answer = await ask(`\nAllow ${toolName}? [yes/no]\n> `);

@@ -134,3 +134,38 @@ export function makeKitLine(label: string): (line: string) => string {
 export function heading(label: string): string {
   return bold(cyan(label));
 }
+
+/**
+ * Common LaTeX math snippets a chat model reaches for assuming a renderer that
+ * understands them (arrows, multiplication, ...), swapped for their Unicode
+ * equivalent. The terminal prints raw text with no LaTeX or markdown renderer,
+ * so `$\rightarrow$` would otherwise show up literally instead of as `→`.
+ * Deliberately not a LaTeX parser — display cleanup for the handful of symbols
+ * models reach for most often, not general math rendering.
+ */
+const LATEX_SYMBOLS: Record<string, string> = {
+  rightarrow: '→',
+  Rightarrow: '⇒',
+  leftarrow: '←',
+  Leftarrow: '⇐',
+  leftrightarrow: '↔',
+  times: '×',
+  div: '÷',
+  pm: '±',
+  cdot: '·',
+  approx: '≈',
+  neq: '≠',
+  leq: '≤',
+  geq: '≥',
+  infty: '∞',
+};
+
+const LATEX_SYMBOL_PATTERN = new RegExp(
+  `\\$?\\\\(${Object.keys(LATEX_SYMBOLS).join('|')})\\$?`,
+  'g',
+);
+
+/** Replace the LaTeX snippets above with their Unicode equivalent. */
+export function humanizeLatexSymbols(text: string): string {
+  return text.replace(LATEX_SYMBOL_PATTERN, (match, name: string) => LATEX_SYMBOLS[name] ?? match);
+}

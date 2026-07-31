@@ -17,6 +17,7 @@
  */
 
 export * from './balance';
+export * from './commands';
 export * from './skill';
 export * from './theme';
 export * from './tools';

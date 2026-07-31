@@ -21,10 +21,24 @@ import { Command } from '@langchain/langgraph';
 import { createChatUi, withRetry, type ChatUi } from '@agent-stack-starter-kits/agent-cli';
 import { ensureSession, type AskFn } from '@agent-stack-starter-kits/circle-tools';
 
-import { BOOTSTRAP_PROMPT, createBalanceReadout } from '@agent-stack-starter-kits/kit-core';
+import {
+  BOOTSTRAP_PROMPT,
+  createBalanceReadout,
+  createCommandRouter,
+  describeSpend,
+} from '@agent-stack-starter-kits/kit-core';
 import { buildAgent } from './agent';
 import { loadConfig } from './config';
-import { bold, colorizeJson, dim, green, heading, kitLine, red, yellow } from './theme';
+import {
+  bold,
+  colorizeJson,
+  green,
+  heading,
+  humanizeLatexSymbols,
+  kitLine,
+  red,
+  yellow,
+} from './theme';
 
 // The chat UI pins the input to the bottom while logs scroll above it. It is
 // created in main(); the module-level handle lets the fatal handler close it
@@ -106,8 +120,11 @@ async function reviewAction(
   ask: (q: string) => Promise<string>,
 ): Promise<Decision> {
   const name = actionName(req);
+  const args = actionArgs(req);
   log(yellow(`approval required for tool: ${bold(name)}`));
-  out(colorizeJson(actionArgs(req)));
+  const summary = await describeSpend(name, args);
+  if (summary) out(summary);
+  out(colorizeJson(args));
 
   const answer = (await ask(bold('Approve this action? [y/N] '))).trim().toLowerCase();
   const approved = answer === 'y' || answer === 'yes';
@@ -168,7 +185,7 @@ function printFinal(result: AgentResult): void {
   const finalContent = isEmptyContent(content)
     ? yellow('(empty model response — provider may be degraded; try again in a moment)')
     : typeof content === 'string'
-      ? content
+      ? humanizeLatexSymbols(content)
       : colorizeJson(content);
 
   out(`\n${heading('--- agent reply ---')}\n`);
@@ -185,7 +202,6 @@ async function main(): Promise<void> {
   log('Autonomous Payment Agent demo starting');
   const config = loadConfig();
   log(`chain=BASE provider=${config.provider} model=${config.model}`);
-  log(dim('tip: type "exit" at any prompt to quit'));
 
   // The marketplace's own bootstrap prompt. setup.md drives the first turn.
   const userPrompt = BOOTSTRAP_PROMPT;
@@ -220,6 +236,10 @@ async function main(): Promise<void> {
   // OTP through it to recover a logged-out session mid-conversation.
   const agent = buildAgent(config, ask);
 
+  // Handles "/balance", "/discover <keyword>", etc. (direct circle-tools calls,
+  // no model turn spent) and bare-number replies to a prior "/discover" list.
+  const commands = createCommandRouter({ log, out, refreshBalance: balance.refresh });
+
   // Interactive chat loop. The first turn runs the bootstrap prompt; after
   // the agent settles, the user drives follow-up turns. Each turn shares the
   // thread_id above, so the agent keeps full context across turns. `exit` or
@@ -241,14 +261,25 @@ async function main(): Promise<void> {
       balance.refreshSoon();
     }
 
-    const next = (await ask('> ')).trim();
+    const next = (await ask('> ', { placeholder: 'type "/help" for quick commands or "exit" to quit' })).trim();
     if (next.toLowerCase() === 'quit') {
       log('done.');
       break;
     }
     // A blank line is a stray Enter, not an intent to quit: re-prompt without
     // running a turn. `exit` (handled in `ask`) and `quit` still halt.
-    input = next ? { messages: [new HumanMessage(next)] } : null;
+    if (!next) {
+      input = null;
+      continue;
+    }
+    // "/command" and a bare number picking a prior "/discover" result are
+    // handled locally; everything else goes to the agent as a normal turn.
+    const outcome = await commands.run(next);
+    input = outcome.handled
+      ? outcome.forward
+        ? { messages: [new HumanMessage(outcome.forward)] }
+        : null
+      : { messages: [new HumanMessage(next)] };
   }
 
   // Unmount the UI (and restore the patched console) so the process can exit.

@@ -22,7 +22,7 @@ import { openai } from '@ai-sdk/openai';
 import type { CoreMessage, LanguageModel } from 'ai';
 import type { KitConfig, ProviderConfig } from './config';
 import type { CircleTools } from './tools';
-import { heading, kitLine, yellow } from './theme';
+import { heading, humanizeLatexSymbols, kitLine, yellow } from './theme';
 
 /**
  * Pick the Vercel AI SDK LanguageModel based on the detected provider.
@@ -34,7 +34,16 @@ function pickModel(config: ProviderConfig): LanguageModel {
   if (config.provider === 'anthropic') {
     return anthropic(config.model);
   }
-  return openai(config.model);
+  // @ai-sdk/openai defaults `structuredOutputs` to true for any "reasoning"
+  // model (any id starting with "o" or "gpt-5" — see its isReasoningModel()),
+  // which turns on OpenAI's strict tool-calling mode: every property must
+  // appear in `required`, with optional ones expressed as nullable instead of
+  // omitted. This kit's tool schemas use ordinary zod `.optional()` fields
+  // (chain, method, ...), so strict mode rejects them outright before the
+  // model ever runs ("'required' is required to be supplied and to be an
+  // array including every key in properties"). Force it off to keep the
+  // schemas as declared.
+  return openai(config.model, { structuredOutputs: false });
 }
 
 /**
@@ -74,7 +83,7 @@ export async function runTurn(
       // Print any prose the model emitted in this step. Tool calls are logged
       // inside each tool's execute function, so we only need to surface text.
       if (text.trim()) {
-        console.log(`\n${heading('--- agent ---')}\n${text}`);
+        console.log(`\n${heading('--- agent ---')}\n${humanizeLatexSymbols(text)}`);
       }
       // Surface a warning when the cap is reached so users understand why the
       // agent stopped mid-task rather than silently abandoning work.

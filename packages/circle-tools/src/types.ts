@@ -16,6 +16,15 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+/**
+ * The shapes the terminal UI reads.
+ *
+ * This package used to model the whole payment surface — x402 challenges,
+ * accept options, payment receipts, service schemas — because a typed tool had
+ * to hand each of them to the model. The agent now runs `circle` directly and
+ * reads its JSON itself, so the only shapes left are the ones the *kit's own
+ * chrome* renders: the pinned balance readout and the slash commands.
+ */
 import type { Chain } from './chains';
 
 export interface AgentWallet {
@@ -37,114 +46,20 @@ export interface Service {
   name: string;
   description?: string;
   /**
-   * Price on `chain`, e.g. "0.03 USDC". Quoted for the chain the kit would
-   * actually settle on, not merely the seller's first-listed option, so a
-   * listing that leads with a network the kit cannot pay still shows a price the
-   * caller can act on.
+   * Price on `chain`, e.g. "0.03 USDC". Quoted for a chain the wallet can
+   * plausibly settle on rather than merely the seller's first-listed option, so
+   * a listing that leads with a network this package does not name still shows
+   * a price the reader can act on.
    */
   price?: string;
-  /** Chain `price` is quoted on, when the seller offers one the kit supports. */
+  /** Chain `price` is quoted on, when the seller offers one this package names. */
   chain?: Chain;
-  /**
-   * HTTP method the service expects, when the marketplace publishes it. Present
-   * on search results so a caller that pays without a separate inspect still
-   * sends the input the way the service reads it.
-   */
+  /** HTTP method the service expects, when the marketplace publishes it. */
   method?: string;
-}
-
-export interface ServiceInspection extends Service {
-  schema?: unknown;
-  health?: 'payable' | 'healthy' | 'degraded' | 'down' | string;
-  /**
-   * Status the marketplace saw when it last probed the endpoint. `402` is a
-   * healthy paid resource; `5xx` means the seller was failing at probe time, so
-   * paying is very likely to buy an error.
-   */
-  httpStatus?: number;
-  /** Price in whole USDC, for comparing against a wallet balance before paying. */
-  priceUsdc?: number;
-  /**
-   * HTTP method the service expects (GET, POST, ...). A GET service reads its
-   * input from the URL query string; a POST/PUT/PATCH service reads it from the
-   * request body. Sending the input the wrong way makes the server see no input.
-   */
-  method?: string;
-  /**
-   * URL of the seller's OpenAPI document, when advertised. Its response schema
-   * names the fields the service can return, which the pre-payment guard uses to
-   * validate enum-less field selectors (e.g. `return_fields`) before spending.
-   */
-  openApiUrl?: string;
-  /** URL of the seller's human docs, when advertised. */
-  docsUrl?: string;
-}
-
-export interface PaymentResult {
-  /**
-   * The paid service's response body: the data the caller actually paid for.
-   * JSON is re-stringified compact; non-JSON is passed through verbatim.
-   */
-  response: string;
-  /**
-   * On-chain settlement tx hash, when one can be parsed from the payment
-   * receipt. Best-effort: a successful payment may still omit it, so success is
-   * decided by the CLI exit code, not by this field's presence.
-   */
-  txHash?: string;
-  serviceUrl: string;
-  amount: string;
 }
 
 export interface GatewayBalance {
   address: string;
-  /** Total USDC held in the wallet's Base Gateway balance. */
+  /** Total USDC held in the wallet's Gateway balance on the chain read. */
   total: string;
-}
-
-export interface GatewayDepositResult {
-  amount: string;
-  /** Circle transaction id / on-chain hash of the deposit, when one is parsed. */
-  txId?: string;
-  /**
-   * The CLI `--method` actually used. `'direct'` deposits source==destination
-   * on the requested chain (13-19 min). `'eco'` is fast (~30s) but is fixed by
-   * the CLI: source=BASE, destination=Polygon Gateway, so it is only valid for
-   * Polygon-settling Gateway sellers.
-   */
-  method?: 'direct' | 'eco';
-}
-
-/** Result of a plain, unpaid GET of a service endpoint. */
-export interface FetchServiceResult {
-  url: string;
-  /** HTTP status of the GET. */
-  status: number;
-  /** True when the endpoint answered HTTP 402; the caller should route to payService. */
-  paymentRequired: boolean;
-  /** Response `content-type`, when the server sent one. */
-  contentType?: string;
-  /** Response body as text; JSON is re-stringified compact, other types passed through. */
-  body: string;
-}
-
-/** Whether an x402 payment option is plain x402 or Circle Gateway batched. */
-export type AcceptKind = 'vanilla' | 'gateway';
-
-/** One payment option from a service's x402 challenge, on a chain the kit supports. */
-export interface AcceptOption {
-  kind: AcceptKind;
-  /** The chain this option settles on (Base or Polygon). */
-  chain: Chain;
-  /** Price in atomic USDC units (6 decimals). */
-  amountAtomic: string;
-}
-
-/** A service's x402 payment options, normalised to what the kit can act on. */
-export interface ServiceAccepts {
-  url: string;
-  /** Payment options the kit can pay, across every supported chain (Base, Polygon). */
-  options: AcceptOption[];
-  /** CAIP-2 networks the seller offers but the kit cannot use (e.g. Solana, Ethereum). */
-  unsupportedNetworks: string[];
 }

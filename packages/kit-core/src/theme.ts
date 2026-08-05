@@ -136,6 +136,30 @@ export function heading(label: string): string {
 }
 
 /**
+ * The frame a finished turn's answer prints in, shared so the six kits end a
+ * turn identically no matter which framework produced the text. Pass the
+ * model's reply; LaTeX cleanup and the empty-reply placeholder are applied here
+ * so no caller has to remember either.
+ *
+ * Prose a kit prints *while* a turn is still running is a different thing and
+ * is not framed this way — see `streamedBlock`.
+ */
+export function replyBlock(text: string | null | undefined): string {
+  const body = humanizeLatexSymbols((text ?? '').trim()) || '(no output)';
+  return `\n${heading('--- agent reply ---')}\n\n${body}\n\n${heading('-------------------')}`;
+}
+
+/**
+ * The frame for prose the model emits mid-turn, in the kits whose frameworks
+ * stream it (the Claude Agent SDK's message stream, the Vercel AI SDK's
+ * `onStepFinish`). Deliberately unclosed and labelled differently from
+ * `replyBlock`: it marks thinking-aloud between tool calls, not the answer.
+ */
+export function streamedBlock(text: string): string {
+  return `\n${heading('--- agent ---')}\n\n${humanizeLatexSymbols(text.trimEnd())}`;
+}
+
+/**
  * Common LaTeX math snippets a chat model reaches for assuming a renderer that
  * understands them (arrows, multiplication, ...), swapped for their Unicode
  * equivalent. The terminal prints raw text with no LaTeX or markdown renderer,

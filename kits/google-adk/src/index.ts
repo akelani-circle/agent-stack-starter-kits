@@ -22,24 +22,16 @@ import { createChatUi, type ChatUi } from '@agent-stack-starter-kits/agent-cli';
 import { ensureSession, type AskFn } from '@agent-stack-starter-kits/circle-tools';
 
 import {
-  BOOTSTRAP_PROMPT,
+  approveCommand,
+  buildInitialPrompt,
   createBalanceReadout,
   createCommandRouter,
-  describeSpend,
+  isProviderOverloaded,
+  reportFatal,
 } from '@agent-stack-starter-kits/kit-core';
 import { buildAgent, type ApprovalFn } from './agent';
 import { loadConfig } from './config';
-import {
-  bold,
-  colorizeJson,
-  dim,
-  green,
-  heading,
-  humanizeLatexSymbols,
-  kitLine,
-  red,
-  yellow,
-} from './theme';
+import { bold, heading, kitLine, red, replyBlock, yellow } from './theme';
 
 const APP_NAME = 'circle-payment-agent';
 const USER_ID = 'demo-user';
@@ -97,8 +89,7 @@ async function main(): Promise<void> {
 
   log('Autonomous Payment Agent demo starting');
   const config = loadConfig();
-  log(`chain=BASE model=${config.model} auth=GOOGLE_API_KEY`);
-  log(dim('tip: type "exit" at any prompt to quit'));
+  log(`provider=${config.provider} model=${config.model}`);
 
   // Every prompt (chat input, approval [y/N], email/OTP) flows through the same
   // pinned input box the chat UI renders at the bottom of the terminal.
@@ -114,24 +105,14 @@ async function main(): Promise<void> {
     return answer;
   };
 
-  // Human-in-the-loop, the ADK-native mirror of LangChain's interruptOn: the
-  // agent's beforeToolCallback routes the two USDC-spending tools through this
-  // approval prompt; every other tool runs without a pause.
-  const approve: ApprovalFn = async (toolName, args) => {
-    log(yellow(`approval required for tool: ${bold(toolName)}`));
-    const summary = await describeSpend(toolName, args);
-    if (summary) out(summary);
-    out(colorizeJson(args));
-    const answer = (await ask(bold('Approve this action? [y/N] '))).trim().toLowerCase();
-    const approved = answer === 'y' || answer === 'yes';
-    log(approved ? green('approved by user') : red('rejected by user'));
-    return approved;
-  };
+  // Human-in-the-loop. The agent's beforeToolCallback routes any shell command
+  // that moves USDC through this prompt; every other command runs without a
+  // pause. What is shown and approved is the command itself, because the command
+  // is what runs.
+  const approve: ApprovalFn = (command) => approveCommand(ask, command, { log, out });
 
-  const agent = buildAgent(config, approve, ask);
+  const agent = await buildAgent(config, approve);
   const runner = new InMemoryRunner({ agent, appName: APP_NAME });
-
-  // The marketplace's own bootstrap prompt. setup.md drives the first turn.
 
   // Inline auth: ensure the Circle CLI has a valid agent session before the
   // agent runs. Logs in with email + OTP if needed; a pending Terms gate is
@@ -154,7 +135,9 @@ async function main(): Promise<void> {
   log('invoking agent ...');
   // `null` means "no new turn to run" — used for the blank-line re-prompt so we
   // never re-invoke the agent without a fresh user message.
-  let input: Content | null = userMessage(BOOTSTRAP_PROMPT);
+  // On a machine with no skills this is Circle's own bootstrap line, so the
+  // first turn installs them; otherwise it is a status check.
+  let input: Content | null = userMessage(await buildInitialPrompt());
 
   while (true) {
     if (input) {
@@ -173,21 +156,28 @@ async function main(): Promise<void> {
       })) {
         if (event.partial) continue;
         if (event.errorCode) {
+          // A 529 that reaches here means the provider is overloaded and any
+          // retries the SDK does internally ran out — transient on the
+          // provider's side, not a kit bug, same as the Claude SDK kit's
+          // equivalent check on `msg.errors`.
+          if (isProviderOverloaded(event.errorMessage ?? event.errorCode)) {
+            log(yellow('The LLM provider is overloaded. This is transient; try again in a moment.'));
+          }
           log(red(`model error ${event.errorCode}: ${event.errorMessage ?? '(no message)'}`));
           continue;
         }
         if (!isFinalResponse(event)) continue;
-        const text = humanizeLatexSymbols(extractText(event));
+        const text = extractText(event);
         if (!text) continue;
-        out(`\n${heading('--- agent reply ---')}\n`);
-        out(text);
-        out(`\n${heading('-------------------')}`);
+        out(replyBlock(text));
       }
       chat.setStatus(null);
       balance.refreshSoon();
     }
 
-    const next = (await ask('> ', { placeholder: 'try "/help" for quick commands' })).trim();
+    const next = (
+      await ask('> ', { placeholder: 'type "/help" for quick commands or "exit" to quit' })
+    ).trim();
     if (next.toLowerCase() === 'quit') {
       log('done.');
       break;
@@ -212,7 +202,6 @@ main().catch((err: unknown) => {
   // Tear down the UI first so the console is restored before we print the
   // failure; otherwise these lines would be swallowed by the Ink frame.
   ui?.close();
-  const message = err instanceof Error ? err.message : String(err);
-  console.error(kitLine(red(`FATAL: ${message}`)));
+  reportFatal(err, kitLine);
   process.exit(1);
 });

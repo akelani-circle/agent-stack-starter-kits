@@ -22,7 +22,7 @@ import { requireSession } from '@agent-stack-starter-kits/circle-tools';
 import { buildAgent } from './agent';
 import { loadConfig } from './config';
 import { withRetry } from '@agent-stack-starter-kits/agent-cli';
-import { BOOTSTRAP_PROMPT } from '@agent-stack-starter-kits/kit-core';
+import { buildInitialPrompt } from '@agent-stack-starter-kits/kit-core';
 
 /**
  * Gate the workflow on a valid Circle agent session.
@@ -51,25 +51,36 @@ const authStep = createStep({
 const agentStep = createStep({
   id: 'agent',
   inputSchema: z.object({ authenticated: z.literal(true) }),
-  outputSchema: z.object({ summary: z.string() }),
+  outputSchema: z.object({ summary: z.string(), prompt: z.string() }),
   execute: async () => {
     const config = loadConfig();
+    // Nothing in this step should reach the approval gate: the session is
+    // already valid, and setup and status checks spend nothing. A prompt here
+    // would mean the agent tried to move USDC during what is supposed to be a
+    // read-only opening turn, and failing loudly is the right answer to that.
     const noInteractiveAsk = async (): Promise<string> => {
       throw new Error('No interactive terminal available in this workflow step.');
     };
-    const agent = buildAgent(config, noInteractiveAsk);
+    const agent = await buildAgent(config, noInteractiveAsk);
+    const prompt = await buildInitialPrompt();
     const result = await withRetry(
-      (signal) => agent.generate(BOOTSTRAP_PROMPT, { maxSteps: 30, abortSignal: signal }),
+      (signal) => agent.generate(prompt, { maxSteps: 30, abortSignal: signal }),
       { label: 'agent' },
     );
-    return { summary: result.text ?? '(no output)' };
+    // `prompt` is returned alongside the summary so `index.ts` can replay the
+    // exact turn this step sent as the first chat-history message, rather than
+    // recomputing it — `buildInitialPrompt()` reads skills off disk fresh each
+    // call, and this step's own run may have just installed them, so a second
+    // call after this step returns can produce a different prompt than the one
+    // `summary` is actually a reply to.
+    return { summary: result.text ?? '(no output)', prompt };
   },
 });
 
 export const onboardingWorkflow = createWorkflow({
   id: 'circle-onboarding',
   inputSchema: z.object({}),
-  outputSchema: z.object({ summary: z.string() }),
+  outputSchema: z.object({ summary: z.string(), prompt: z.string() }),
 })
   .then(authStep)
   .then(agentStep)

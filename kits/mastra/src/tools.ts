@@ -16,483 +16,84 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+/**
+ * The Mastra adapter: three tools, no logic.
+ *
+ * Every body here is one call into `kit-core`, which is the point. What a shell
+ * command does, how a truncated result reads, when a spend stops for the user —
+ * all of that is identical across the six kits, so it lives in one place and
+ * this file is only the shape Mastra wants it in.
+ *
+ * Approval is in-tool. Mastra does have a native gate — a `Workspace` with a
+ * `LocalSandbox` exposes an `execute_command` tool whose `requireApproval` takes
+ * the command and suspends the run — and that is the better fit when a UI is
+ * driving, because Studio renders the suspended command and resumes it on a
+ * click. This kit drives a terminal loop instead, where a suspend has to be
+ * caught and resumed by hand for something the chat prompt can just ask; so the
+ * gate runs inside `executeShell` when `ask` is present, as it does in the
+ * LangChain and Vercel kits. See the Mastra `circle-payment-agent` template for
+ * the Workspace version.
+ */
 import { createTool } from '@mastra/core/tools';
 import { z } from 'zod';
-import * as circle from '@agent-stack-starter-kits/circle-tools';
+import type { AskFn as CircleAskFn } from '@agent-stack-starter-kits/circle-tools';
 import {
-  approveSpend,
-  ensureDeployed,
-  fetchSetupSkill,
-  fetchSubSkill,
-  parsePayload,
-  preview,
-  recordServiceSearch,
-  selectDepositMethod,
-  selectGatewayChain,
-  selectPayChain,
-  CHAIN_VALUES,
-  HTTP_METHOD_VALUES,
+  executeGrep,
+  executeReadFile,
+  executeShell,
   PARAM_DESCRIPTIONS,
-  SETUP_SKILL_URL,
-  SUB_SKILL_NAMES,
   TOOL_DESCRIPTIONS,
-  type SubSkillName,
+  TOOL_NAMES,
+  type ToolIo,
 } from '@agent-stack-starter-kits/kit-core';
-import { bold, toolLine } from './theme';
+import { toolLine } from './theme';
 
 /** How the kits prompt a human; shared so prompt options (e.g. the OTP's
  * `echo: false`) survive the trip from a tool down to the chat UI. */
-export type AskFn = circle.AskFn;
+export type AskFn = CircleAskFn;
 
-const subSkillEnum = z.enum(SUB_SKILL_NAMES as [SubSkillName, ...SubSkillName[]]);
-const chainEnum = z.enum(CHAIN_VALUES);
-const methodEnum = z.enum(HTTP_METHOD_VALUES);
-
-function log(line: string): void {
-  console.log(toolLine(line));
-}
-
-/**
- * Build the Mastra tool set.
- *
- * `ask` is threaded in so the tools that need the human — login, and the two
- * that move USDC — can pause for terminal input. Mastra's `Agent` has no
- * external per-tool approval hook (no `interruptOn`, no `canUseTool`), so like
- * the Vercel AI kit the approval gate lives inside the spend tool's `execute`
- * and runs before any USDC moves.
- */
+/** Build the Mastra tool set. */
 export function buildTools(ask: AskFn) {
-  // ── Auth tools ────────────────────────────────────────────────────────────
+  const io: ToolIo = {
+    log: (line) => console.log(toolLine(line)),
+    out: (line) => console.log(line),
+    ask,
+  };
 
-  const loginTool = createTool({
-    id: 'circle_login',
-    description: TOOL_DESCRIPTIONS.circle_login,
-    inputSchema: z.object({}),
-    execute: async () => {
-      log('circle_login');
-      try {
-        const result = await circle.ensureSession({ ask, log, bold });
-        log(`circle_login ← ${result.status}`);
-        return { status: result.status };
-      } catch (e) {
-        log(`circle_login ✗ ${(e as Error).message}`);
-        throw e;
-      }
-    },
-  });
-
-  const logoutTool = createTool({
-    id: 'circle_logout',
-    description: TOOL_DESCRIPTIONS.circle_logout,
-    inputSchema: z.object({}),
-    execute: async () => {
-      log('circle_logout');
-      try {
-        await circle.logout(log);
-        return { loggedOut: true };
-      } catch (e) {
-        log(`circle_logout ✗ ${(e as Error).message}`);
-        throw e;
-      }
-    },
-  });
-
-  // ── Skill fetchers ────────────────────────────────────────────────────────
-
-  const fetchSetupSkillTool = createTool({
-    id: 'fetch_setup_skill',
-    description: TOOL_DESCRIPTIONS.fetch_setup_skill,
-    inputSchema: z.object({}),
-    execute: async () => {
-      log(`fetch_setup_skill → ${SETUP_SKILL_URL}`);
-      try {
-        const body = await fetchSetupSkill();
-        log(`fetch_setup_skill ← ${body.length} bytes`);
-        return body;
-      } catch (e) {
-        log(`fetch_setup_skill ✗ ${(e as Error).message}`);
-        throw e;
-      }
-    },
-  });
-
-  const fetchSubSkillTool = createTool({
-    id: 'fetch_sub_skill',
-    description: TOOL_DESCRIPTIONS.fetch_sub_skill,
+  const shell = createTool({
+    id: TOOL_NAMES.SHELL,
+    description: TOOL_DESCRIPTIONS[TOOL_NAMES.SHELL],
     inputSchema: z.object({
-      name: subSkillEnum.describe(PARAM_DESCRIPTIONS.subSkillName),
+      command: z.string().describe(PARAM_DESCRIPTIONS.command),
     }),
-    execute: async (input) => {
-      log(`fetch_sub_skill name=${input.name}`);
-      try {
-        const body = await fetchSubSkill(input.name);
-        log(`fetch_sub_skill ← ${body.length} bytes`);
-        return body;
-      } catch (e) {
-        log(`fetch_sub_skill ✗ ${(e as Error).message}`);
-        throw e;
-      }
-    },
+    execute: ({ command }) => executeShell(command, io),
   });
 
-  // ── Wallet tools ──────────────────────────────────────────────────────────
-
-  const circleCreateWallet = createTool({
-    id: 'circle_create_wallet',
-    description: TOOL_DESCRIPTIONS.circle_create_wallet,
-    inputSchema: z.object({}),
-    execute: async () => {
-      log('circle_create_wallet');
-      try {
-        const result = await circle.createWallet();
-        log(`circle_create_wallet ← ${result.address}`);
-        return result;
-      } catch (e) {
-        log(`circle_create_wallet ✗ ${(e as Error).message}`);
-        throw e;
-      }
-    },
-  });
-
-  const circleListWallets = createTool({
-    id: 'circle_list_wallets',
-    description: TOOL_DESCRIPTIONS.circle_list_wallets,
-    inputSchema: z.object({}),
-    execute: async () => {
-      log('circle_list_wallets');
-      try {
-        const result = await circle.listWallets();
-        log(`circle_list_wallets ← ${result.length} wallet(s)`);
-        return result;
-      } catch (e) {
-        log(`circle_list_wallets ✗ ${(e as Error).message}`);
-        throw e;
-      }
-    },
-  });
-
-  const circleGetBalance = createTool({
-    id: 'circle_get_balance',
-    description: TOOL_DESCRIPTIONS.circle_get_balance,
+  const readFile = createTool({
+    id: TOOL_NAMES.READ_FILE,
+    description: TOOL_DESCRIPTIONS[TOOL_NAMES.READ_FILE],
     inputSchema: z.object({
-      address: z.string().describe(PARAM_DESCRIPTIONS.address),
-      chain: chainEnum.optional().describe(PARAM_DESCRIPTIONS.chain),
+      filePath: z.string().describe(PARAM_DESCRIPTIONS.filePath),
+      offset: z.number().int().positive().optional().describe(PARAM_DESCRIPTIONS.offset),
+      limit: z.number().int().positive().optional().describe(PARAM_DESCRIPTIONS.limit),
     }),
-    execute: async (input) => {
-      log(`circle_get_balance address=${input.address} chain=${input.chain ?? circle.DEFAULT_CHAIN}`);
-      try {
-        const result = await circle.getBalance({ address: input.address, chain: input.chain });
-        const usdc = result.tokens.find((t) => t.symbol?.toUpperCase() === 'USDC');
-        log(`circle_get_balance ← USDC=${usdc?.amount ?? '0'} (${result.tokens.length} token(s))`);
-        return result;
-      } catch (e) {
-        log(`circle_get_balance ✗ ${(e as Error).message}`);
-        throw e;
-      }
-    },
+    execute: (args) => executeReadFile(args, io),
   });
 
-  const circleWalletFund = createTool({
-    id: 'circle_wallet_fund',
-    description: TOOL_DESCRIPTIONS.circle_wallet_fund,
+  const grep = createTool({
+    id: TOOL_NAMES.GREP,
+    description: TOOL_DESCRIPTIONS[TOOL_NAMES.GREP],
     inputSchema: z.object({
-      address: z.string().describe(PARAM_DESCRIPTIONS.address),
-      method: z
-        .enum(['crypto', 'fiat'])
-        .default('crypto')
-        .describe('"crypto" draws from the testnet faucet; "fiat" runs the test card flow.'),
+      pattern: z.string().describe(PARAM_DESCRIPTIONS.pattern),
+      searchPath: z.string().optional().describe(PARAM_DESCRIPTIONS.searchPath),
+      glob: z.string().optional().describe(PARAM_DESCRIPTIONS.glob),
     }),
-    execute: async (input) => {
-      log(`circle_wallet_fund address=${input.address} method=${input.method}`);
-      try {
-        const out = await circle.fundWallet({ address: input.address, method: input.method });
-        log('circle_wallet_fund ← done');
-        return out;
-      } catch (e) {
-        log(`circle_wallet_fund ✗ ${(e as Error).message}`);
-        throw e;
-      }
-    },
-  });
-
-  const circleDeployWallet = createTool({
-    id: 'circle_deploy_wallet',
-    description: TOOL_DESCRIPTIONS.circle_deploy_wallet,
-    inputSchema: z.object({
-      address: z.string().describe(PARAM_DESCRIPTIONS.address),
-      chain: chainEnum.optional().describe(PARAM_DESCRIPTIONS.chain),
-    }),
-    execute: async (input) => {
-      log(
-        `circle_deploy_wallet address=${input.address} chain=${input.chain ?? circle.DEFAULT_CHAIN}`,
-      );
-      try {
-        const result = await circle.deployWallet({ address: input.address, chain: input.chain });
-        if (result.alreadyDeployed) {
-          log('circle_deploy_wallet ← already deployed');
-        } else if (result.deployed) {
-          log(`circle_deploy_wallet ← deployed tx=${result.txId ?? 'n/a'}`);
-        } else {
-          log(
-            `circle_deploy_wallet ← submitted, on-chain confirmation pending tx=${result.txId ?? 'n/a'}`,
-          );
-        }
-        return result;
-      } catch (e) {
-        log(`circle_deploy_wallet ✗ ${(e as Error).message}`);
-        throw e;
-      }
-    },
-  });
-
-  const fundFiatTool = createTool({
-    id: 'circle_fund_fiat',
-    description: TOOL_DESCRIPTIONS.circle_fund_fiat,
-    inputSchema: z.object({
-      address: z.string().describe(PARAM_DESCRIPTIONS.address),
-      amount: z.number().positive().describe(PARAM_DESCRIPTIONS.fiatAmount),
-      chain: chainEnum.optional().describe(PARAM_DESCRIPTIONS.chain),
-      token: z
-        .enum(['usdc', 'eurc', 'eth', 'native'])
-        .optional()
-        .describe('Token to buy. Defaults to usdc.'),
-    }),
-    execute: async (input) => {
-      log(
-        `circle_fund_fiat address=${input.address} amount=${input.amount} chain=${input.chain ?? circle.DEFAULT_CHAIN} token=${input.token ?? 'usdc'}`,
-      );
-      try {
-        // Local interactive demo: open the Transak page in the user's browser so
-        // they can complete the purchase. Best-effort, a no-op on headless.
-        const result = await circle.fundWalletFiat({
-          address: input.address,
-          amount: input.amount,
-          chain: input.chain,
-          token: input.token,
-          open: true,
-        });
-        log(`circle_fund_fiat ← ${preview(result.url, 80)}`);
-        return result;
-      } catch (e) {
-        log(`circle_fund_fiat ✗ ${(e as Error).message}`);
-        throw e;
-      }
-    },
-  });
-
-  // ── Service discovery tools ───────────────────────────────────────────────
-
-  const fetchServiceTool = createTool({
-    id: 'fetch_service',
-    description: TOOL_DESCRIPTIONS.fetch_service,
-    inputSchema: z.object({
-      url: z.string().describe(PARAM_DESCRIPTIONS.serviceUrl),
-    }),
-    execute: async (input) => {
-      log(`fetch_service url=${input.url}`);
-      try {
-        const result = await circle.fetchService({ url: input.url });
-        if (result.paymentRequired) {
-          log('fetch_service ← HTTP 402, payment required');
-        } else {
-          log(`fetch_service ← HTTP ${result.status} ${result.body.length} bytes`);
-        }
-        return result;
-      } catch (e) {
-        log(`fetch_service ✗ ${(e as Error).message}`);
-        throw e;
-      }
-    },
-  });
-
-  const circleSearchServices = createTool({
-    id: 'circle_search_services',
-    description: TOOL_DESCRIPTIONS.circle_search_services,
-    inputSchema: z.object({
-      keyword: z.string().describe('Search keyword.'),
-    }),
-    execute: async (input) => {
-      log(`circle_search_services keyword="${input.keyword}"`);
-      try {
-        const result = await circle.searchServices({ keyword: input.keyword });
-        log(`circle_search_services ← ${result.length} hit(s)`);
-        // Makes these hits addressable by number at the next prompt, exactly as
-        // if the user had run `/discover` themselves.
-        recordServiceSearch(result);
-        return result;
-      } catch (e) {
-        log(`circle_search_services ✗ ${(e as Error).message}`);
-        throw e;
-      }
-    },
-  });
-
-  const circleInspectService = createTool({
-    id: 'circle_inspect_service',
-    description: TOOL_DESCRIPTIONS.circle_inspect_service,
-    inputSchema: z.object({
-      url: z.string().describe(PARAM_DESCRIPTIONS.serviceUrl),
-    }),
-    execute: async (input) => {
-      log(`circle_inspect_service url=${input.url}`);
-      try {
-        const result = await circle.inspectService({ url: input.url });
-        log(`circle_inspect_service ← ${preview(JSON.stringify(result))}`);
-        return result;
-      } catch (e) {
-        log(`circle_inspect_service ✗ ${(e as Error).message}`);
-        throw e;
-      }
-    },
-  });
-
-  const circleGetGatewayBalance = createTool({
-    id: 'circle_get_gateway_balance',
-    description: TOOL_DESCRIPTIONS.circle_get_gateway_balance,
-    inputSchema: z.object({
-      address: z.string().describe(PARAM_DESCRIPTIONS.address),
-      chain: chainEnum.optional().describe(PARAM_DESCRIPTIONS.chain),
-    }),
-    execute: async (input) => {
-      log(
-        `circle_get_gateway_balance address=${input.address} chain=${input.chain ?? circle.DEFAULT_CHAIN}`,
-      );
-      try {
-        const result = await circle.gatewayBalance({ address: input.address, chain: input.chain });
-        log(`circle_get_gateway_balance ← total=${result.total} USDC`);
-        return result;
-      } catch (e) {
-        log(`circle_get_gateway_balance ✗ ${(e as Error).message}`);
-        throw e;
-      }
-    },
-  });
-
-  // ── Spend tools — require human approval before executing ─────────────────
-  //
-  // Mastra's Agent exposes no external per-tool approval hook, so the
-  // human-in-the-loop lives inside `execute`, exactly as in the Vercel AI kit:
-  // the agent calls the tool normally, execution pauses on `await ask(...)`
-  // inside `approveSpend`, and no USDC moves unless the human approves.
-
-  const circlePayService = createTool({
-    id: 'circle_pay_service',
-    description: TOOL_DESCRIPTIONS.circle_pay_service,
-    inputSchema: z.object({
-      url: z.string().describe(PARAM_DESCRIPTIONS.serviceUrl),
-      address: z.string().describe(PARAM_DESCRIPTIONS.address),
-      method: methodEnum.optional().describe(PARAM_DESCRIPTIONS.httpMethod),
-      dataJson: z.string().describe(PARAM_DESCRIPTIONS.dataJson),
-    }),
-    execute: async (input) => {
-      const httpMethod = (input.method ?? 'GET').toUpperCase();
-      log(
-        `circle_pay_service url=${input.url} from=${input.address} method=${httpMethod} data=${preview(input.dataJson, 80)}`,
-      );
-
-      const payload = parsePayload(input.dataJson);
-      if (!payload.ok) {
-        log('circle_pay_service ✗ invalid dataJson');
-        throw new Error(payload.message);
-      }
-
-      const args = {
-        url: input.url,
-        address: input.address,
-        method: httpMethod,
-        data: payload.data,
-      };
-      if (!(await approveSpend(ask, 'circle_pay_service', args, log))) {
-        return { denied: true };
-      }
-
-      const chain = await selectPayChain(input.url, httpMethod, input.address, log);
-      if (!chain.ok) throw new Error(chain.message);
-
-      const deployed = await ensureDeployed(input.address, chain.chain, log);
-      if (!deployed.ok) throw new Error(deployed.message);
-
-      try {
-        const result = await circle.payService({
-          url: input.url,
-          address: input.address,
-          data: payload.data,
-          method: httpMethod,
-          chain: chain.chain,
-        });
-        const tx = result.txHash ? ` txHash=${result.txHash}` : '';
-        log(`circle_pay_service ← paid on ${circle.chainLabel(chain.chain)}${tx}`);
-        return result;
-      } catch (e) {
-        log(`circle_pay_service ✗ ${(e as Error).message}`);
-        throw e;
-      }
-    },
-  });
-
-  const circleGatewayDeposit = createTool({
-    id: 'circle_gateway_deposit',
-    description: TOOL_DESCRIPTIONS.circle_gateway_deposit,
-    inputSchema: z.object({
-      url: z.string().describe(PARAM_DESCRIPTIONS.serviceUrl),
-      address: z.string().describe(PARAM_DESCRIPTIONS.address),
-      method: methodEnum.optional().describe(PARAM_DESCRIPTIONS.httpMethod),
-      amount: z.number().positive().describe(PARAM_DESCRIPTIONS.depositAmount),
-    }),
-    execute: async (input) => {
-      const httpMethod = (input.method ?? 'GET').toUpperCase();
-      log(
-        `circle_gateway_deposit url=${input.url} address=${input.address} amount=${input.amount}`,
-      );
-
-      const args = {
-        url: input.url,
-        address: input.address,
-        method: httpMethod,
-        amount: input.amount,
-      };
-      if (!(await approveSpend(ask, 'circle_gateway_deposit', args, log))) {
-        return { denied: true };
-      }
-
-      const chain = await selectGatewayChain(input.url, httpMethod, log);
-      if (!chain.ok) throw new Error(chain.message);
-
-      const depositMethod = selectDepositMethod(chain.chain);
-      try {
-        const result = await circle.gatewayDeposit({
-          address: input.address,
-          amount: input.amount,
-          chain: chain.chain,
-          method: depositMethod,
-        });
-        log(
-          `circle_gateway_deposit ← ${result.amount} USDC on ${circle.chainLabel(chain.chain)} via ${depositMethod} tx=${result.txId ?? 'n/a'}`,
-        );
-        return result;
-      } catch (e) {
-        log(`circle_gateway_deposit ✗ ${(e as Error).message}`);
-        throw e;
-      }
-    },
+    execute: (args) => executeGrep(args, io),
   });
 
   return {
-    loginTool,
-    logoutTool,
-    fetchSetupSkillTool,
-    fetchSubSkillTool,
-    circleCreateWallet,
-    circleListWallets,
-    circleGetBalance,
-    circleWalletFund,
-    circleDeployWallet,
-    fundFiatTool,
-    fetchServiceTool,
-    circleSearchServices,
-    circleInspectService,
-    circleGetGatewayBalance,
-    circlePayService,
-    circleGatewayDeposit,
+    [TOOL_NAMES.SHELL]: shell,
+    [TOOL_NAMES.READ_FILE]: readFile,
+    [TOOL_NAMES.GREP]: grep,
   };
 }

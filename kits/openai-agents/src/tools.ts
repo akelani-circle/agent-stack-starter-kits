@@ -16,434 +16,88 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+/**
+ * The OpenAI Agents SDK adapter: three tools, no logic.
+ *
+ * Every body here is one call into `kit-core`, which is the point. What a shell
+ * command does, how a truncated result reads, when a spend stops for the user —
+ * all of that is identical across the six kits, so it lives in one place and
+ * this file is only the shape the Agents SDK wants it in.
+ *
+ * Approval is external, and this SDK makes that easy: `needsApproval` is a
+ * function of the call's own arguments, so it can ask the same question the gate
+ * asks — is *this command* one that spends? A true answer interrupts the run,
+ * and `index.ts` prompts and resumes. No `ask` is threaded into the tool bodies
+ * as a result, which is why `buildTools` takes nothing.
+ */
 import { tool } from '@openai/agents';
 import { z } from 'zod';
-import * as circle from '@agent-stack-starter-kits/circle-tools';
 import {
-  ensureDeployed,
-  fetchSetupSkill,
-  fetchSubSkill,
-  parsePayload,
-  preview,
-  recordServiceSearch,
-  selectDepositMethod,
-  selectGatewayChain,
-  selectPayChain,
-  CHAIN_VALUES,
-  HTTP_METHOD_VALUES,
+  executeGrep,
+  executeReadFile,
+  executeShell,
+  requiresApproval,
   PARAM_DESCRIPTIONS,
-  SETUP_SKILL_URL,
-  SUB_SKILL_NAMES,
   TOOL_DESCRIPTIONS,
-  type SubSkillName,
+  TOOL_NAMES,
+  type ToolIo,
 } from '@agent-stack-starter-kits/kit-core';
-import { bold, toolLine } from './theme';
+import { toolLine } from './theme';
 
-/** How the kits prompt a human; shared so prompt options (e.g. the OTP's
- * `echo: false`) survive the trip from a tool down to the chat UI. */
-export type AskFn = circle.AskFn;
+const io: ToolIo = {
+  log: (line) => console.log(toolLine(line)),
+  out: (line) => console.log(line),
+};
 
-const subSkillEnum = z.enum(SUB_SKILL_NAMES as [SubSkillName, ...SubSkillName[]]);
-const chainEnum = z.enum(CHAIN_VALUES);
-const methodEnum = z.enum(HTTP_METHOD_VALUES);
-
-function log(line: string): void {
-  console.log(toolLine(line));
-}
-
-// ── Skill fetchers ──────────────────────────────────────────────────────────
-
-export const fetchSetupSkillTool = tool({
-  name: 'fetch_setup_skill',
-  description: TOOL_DESCRIPTIONS.fetch_setup_skill,
-  parameters: z.object({}),
-  execute: async () => {
-    log(`fetch_setup_skill → ${SETUP_SKILL_URL}`);
-    try {
-      const body = await fetchSetupSkill();
-      log(`fetch_setup_skill ← ${body.length} bytes`);
-      return body;
-    } catch (e) {
-      log(`fetch_setup_skill ✗ ${(e as Error).message}`);
-      throw e;
-    }
-  },
-});
-
-export const fetchSubSkillTool = tool({
-  name: 'fetch_sub_skill',
-  description: TOOL_DESCRIPTIONS.fetch_sub_skill,
+export const shellTool = tool({
+  name: TOOL_NAMES.SHELL,
+  description: TOOL_DESCRIPTIONS[TOOL_NAMES.SHELL],
   parameters: z.object({
-    name: subSkillEnum.describe(PARAM_DESCRIPTIONS.subSkillName),
+    command: z.string().describe(PARAM_DESCRIPTIONS.command),
   }),
-  execute: async ({ name }) => {
-    log(`fetch_sub_skill name=${name}`);
-    try {
-      const body = await fetchSubSkill(name);
-      log(`fetch_sub_skill ← ${body.length} bytes`);
-      return body;
-    } catch (e) {
-      log(`fetch_sub_skill ✗ ${(e as Error).message}`);
-      throw e;
-    }
-  },
+  // The run pauses here only for a command that moves USDC; everything else
+  // runs straight through. See kit-core's `approval` for the list.
+  needsApproval: async (_context, { command }) => requiresApproval(command),
+  execute: ({ command }) => executeShell(command, io),
 });
 
-// ── Wallet tools ────────────────────────────────────────────────────────────
-
-export const circleCreateWallet = tool({
-  name: 'circle_create_wallet',
-  description: TOOL_DESCRIPTIONS.circle_create_wallet,
-  parameters: z.object({}),
-  execute: async () => {
-    log('circle_create_wallet');
-    try {
-      const result = await circle.createWallet();
-      log(`circle_create_wallet ← ${result.address}`);
-      return JSON.stringify(result);
-    } catch (e) {
-      log(`circle_create_wallet ✗ ${(e as Error).message}`);
-      throw e;
-    }
-  },
-});
-
-export const circleListWallets = tool({
-  name: 'circle_list_wallets',
-  description: TOOL_DESCRIPTIONS.circle_list_wallets,
-  parameters: z.object({}),
-  execute: async () => {
-    log('circle_list_wallets');
-    try {
-      const result = await circle.listWallets();
-      log(`circle_list_wallets ← ${result.length} wallet(s)`);
-      return JSON.stringify(result);
-    } catch (e) {
-      log(`circle_list_wallets ✗ ${(e as Error).message}`);
-      throw e;
-    }
-  },
-});
-
-export const circleGetBalance = tool({
-  name: 'circle_get_balance',
-  description: TOOL_DESCRIPTIONS.circle_get_balance,
+export const readFileTool = tool({
+  name: TOOL_NAMES.READ_FILE,
+  description: TOOL_DESCRIPTIONS[TOOL_NAMES.READ_FILE],
   parameters: z.object({
-    address: z.string().describe(PARAM_DESCRIPTIONS.address),
-    chain: chainEnum.optional().describe(PARAM_DESCRIPTIONS.chain),
+    filePath: z.string().describe(PARAM_DESCRIPTIONS.filePath),
+    offset: z.number().int().positive().nullable().describe(PARAM_DESCRIPTIONS.offset),
+    limit: z.number().int().positive().nullable().describe(PARAM_DESCRIPTIONS.limit),
   }),
-  execute: async ({ address, chain }) => {
-    log(`circle_get_balance address=${address} chain=${chain ?? circle.DEFAULT_CHAIN}`);
-    try {
-      const result = await circle.getBalance({ address, chain: chain ?? undefined });
-      const usdc = result.tokens.find((t) => t.symbol?.toUpperCase() === 'USDC');
-      log(`circle_get_balance ← USDC=${usdc?.amount ?? '0'} (${result.tokens.length} token(s))`);
-      return JSON.stringify(result);
-    } catch (e) {
-      log(`circle_get_balance ✗ ${(e as Error).message}`);
-      throw e;
-    }
-  },
+  execute: ({ filePath, offset, limit }) =>
+    executeReadFile(
+      { filePath, offset: offset ?? undefined, limit: limit ?? undefined },
+      io,
+    ),
 });
 
-export const circleWalletFund = tool({
-  name: 'circle_wallet_fund',
-  description: TOOL_DESCRIPTIONS.circle_wallet_fund,
+export const grepTool = tool({
+  name: TOOL_NAMES.GREP,
+  description: TOOL_DESCRIPTIONS[TOOL_NAMES.GREP],
   parameters: z.object({
-    address: z.string().describe(PARAM_DESCRIPTIONS.address),
-    method: z
-      .enum(['crypto', 'fiat'])
-      .default('crypto')
-      .describe('"crypto" draws from the testnet faucet; "fiat" runs the test card flow.'),
+    pattern: z.string().describe(PARAM_DESCRIPTIONS.pattern),
+    searchPath: z.string().nullable().describe(PARAM_DESCRIPTIONS.searchPath),
+    glob: z.string().nullable().describe(PARAM_DESCRIPTIONS.glob),
   }),
-  execute: async ({ address, method }) => {
-    log(`circle_wallet_fund address=${address} method=${method}`);
-    try {
-      const out = await circle.fundWallet({ address, method: method ?? 'crypto' });
-      log('circle_wallet_fund ← done');
-      return out;
-    } catch (e) {
-      log(`circle_wallet_fund ✗ ${(e as Error).message}`);
-      throw e;
-    }
-  },
+  execute: ({ pattern, searchPath, glob }) =>
+    executeGrep(
+      { pattern, searchPath: searchPath ?? undefined, glob: glob ?? undefined },
+      io,
+    ),
 });
 
-export const circleDeployWallet = tool({
-  name: 'circle_deploy_wallet',
-  description: TOOL_DESCRIPTIONS.circle_deploy_wallet,
-  parameters: z.object({
-    address: z.string().describe(PARAM_DESCRIPTIONS.address),
-    chain: chainEnum.optional().describe(PARAM_DESCRIPTIONS.chain),
-  }),
-  execute: async ({ address, chain }) => {
-    log(`circle_deploy_wallet address=${address} chain=${chain ?? circle.DEFAULT_CHAIN}`);
-    try {
-      const result = await circle.deployWallet({ address, chain: chain ?? undefined });
-      if (result.alreadyDeployed) {
-        log('circle_deploy_wallet ← already deployed');
-      } else if (result.deployed) {
-        log(`circle_deploy_wallet ← deployed tx=${result.txId ?? 'n/a'}`);
-      } else {
-        log(
-          `circle_deploy_wallet ← submitted, on-chain confirmation pending tx=${result.txId ?? 'n/a'}`,
-        );
-      }
-      return JSON.stringify(result);
-    } catch (e) {
-      log(`circle_deploy_wallet ✗ ${(e as Error).message}`);
-      throw e;
-    }
-  },
-});
-
-export const fundFiatTool = tool({
-  name: 'circle_fund_fiat',
-  description: TOOL_DESCRIPTIONS.circle_fund_fiat,
-  parameters: z.object({
-    address: z.string().describe(PARAM_DESCRIPTIONS.address),
-    amount: z.number().positive().describe(PARAM_DESCRIPTIONS.fiatAmount),
-    chain: chainEnum.optional().describe(PARAM_DESCRIPTIONS.chain),
-    token: z
-      .enum(['usdc', 'eurc', 'eth', 'native'])
-      .optional()
-      .describe('Token to buy. Defaults to usdc.'),
-  }),
-  execute: async ({ address, amount, chain, token }) => {
-    log(
-      `circle_fund_fiat address=${address} amount=${amount} chain=${chain ?? circle.DEFAULT_CHAIN} token=${token ?? 'usdc'}`,
-    );
-    try {
-      // Local interactive demo: open the Transak page in the user's browser so
-      // they can complete the purchase. Best-effort, a no-op on headless.
-      const result = await circle.fundWalletFiat({
-        address,
-        amount,
-        chain: chain ?? undefined,
-        token: token ?? undefined,
-        open: true,
-      });
-      log(`circle_fund_fiat ← ${preview(result.url, 80)}`);
-      return JSON.stringify(result);
-    } catch (e) {
-      log(`circle_fund_fiat ✗ ${(e as Error).message}`);
-      throw e;
-    }
-  },
-});
-
-// ── Service discovery tools ─────────────────────────────────────────────────
-
-export const fetchServiceTool = tool({
-  name: 'fetch_service',
-  description: TOOL_DESCRIPTIONS.fetch_service,
-  parameters: z.object({
-    url: z.string().describe(PARAM_DESCRIPTIONS.serviceUrl),
-  }),
-  execute: async ({ url }) => {
-    log(`fetch_service url=${url}`);
-    try {
-      const result = await circle.fetchService({ url });
-      if (result.paymentRequired) {
-        log('fetch_service ← HTTP 402, payment required');
-      } else {
-        log(`fetch_service ← HTTP ${result.status} ${result.body.length} bytes`);
-      }
-      return JSON.stringify(result);
-    } catch (e) {
-      log(`fetch_service ✗ ${(e as Error).message}`);
-      throw e;
-    }
-  },
-});
-
-export const circleSearchServices = tool({
-  name: 'circle_search_services',
-  description: TOOL_DESCRIPTIONS.circle_search_services,
-  parameters: z.object({
-    keyword: z.string().describe('Search keyword.'),
-  }),
-  execute: async ({ keyword }) => {
-    log(`circle_search_services keyword="${keyword}"`);
-    try {
-      const result = await circle.searchServices({ keyword });
-      log(`circle_search_services ← ${result.length} hit(s)`);
-      // Makes these hits addressable by number at the next prompt, exactly as
-      // if the user had run `/discover` themselves.
-      recordServiceSearch(result);
-      return JSON.stringify(result);
-    } catch (e) {
-      log(`circle_search_services ✗ ${(e as Error).message}`);
-      throw e;
-    }
-  },
-});
-
-export const circleInspectService = tool({
-  name: 'circle_inspect_service',
-  description: TOOL_DESCRIPTIONS.circle_inspect_service,
-  parameters: z.object({
-    url: z.string().describe(PARAM_DESCRIPTIONS.serviceUrl),
-  }),
-  execute: async ({ url }) => {
-    log(`circle_inspect_service url=${url}`);
-    try {
-      const result = await circle.inspectService({ url });
-      log(`circle_inspect_service ← ${preview(JSON.stringify(result))}`);
-      return JSON.stringify(result);
-    } catch (e) {
-      log(`circle_inspect_service ✗ ${(e as Error).message}`);
-      throw e;
-    }
-  },
-});
-
-export const circleGetGatewayBalance = tool({
-  name: 'circle_get_gateway_balance',
-  description: TOOL_DESCRIPTIONS.circle_get_gateway_balance,
-  parameters: z.object({
-    address: z.string().describe(PARAM_DESCRIPTIONS.address),
-    chain: chainEnum.optional().describe(PARAM_DESCRIPTIONS.chain),
-  }),
-  execute: async ({ address, chain }) => {
-    log(`circle_get_gateway_balance address=${address} chain=${chain ?? circle.DEFAULT_CHAIN}`);
-    try {
-      const result = await circle.gatewayBalance({ address, chain: chain ?? undefined });
-      log(`circle_get_gateway_balance ← total=${result.total} USDC`);
-      return JSON.stringify(result);
-    } catch (e) {
-      log(`circle_get_gateway_balance ✗ ${(e as Error).message}`);
-      throw e;
-    }
-  },
-});
-
-// ── Spend tools ─────────────────────────────────────────────────────────────
-//
-// `needsApproval: true` is the OpenAI Agents SDK's native human-in-the-loop
-// hook: the run interrupts before the tool executes and the entry point drives
-// the y/N prompt, so unlike the Vercel AI kit no approval logic lives in here.
-//
-// These throw rather than return errors: the SDK surfaces a thrown tool error
-// back to the model as the tool result, so the model can still recover.
-
-export const circlePayService = tool({
-  name: 'circle_pay_service',
-  description: TOOL_DESCRIPTIONS.circle_pay_service,
-  needsApproval: true,
-  parameters: z.object({
-    url: z.string().describe(PARAM_DESCRIPTIONS.serviceUrl),
-    address: z.string().describe(PARAM_DESCRIPTIONS.address),
-    method: methodEnum.optional().describe(PARAM_DESCRIPTIONS.httpMethod),
-    dataJson: z.string().describe(PARAM_DESCRIPTIONS.dataJson),
-  }),
-  execute: async ({ url, address, method, dataJson }) => {
-    const httpMethod = (method ?? 'GET').toUpperCase();
-    log(
-      `circle_pay_service url=${url} from=${address} method=${httpMethod} data=${preview(dataJson, 80)}`,
-    );
-
-    const payload = parsePayload(dataJson);
-    if (!payload.ok) {
-      log('circle_pay_service ✗ invalid dataJson');
-      throw new Error(payload.message);
-    }
-
-    const chain = await selectPayChain(url, httpMethod, address, log);
-    if (!chain.ok) throw new Error(chain.message);
-
-    const deployed = await ensureDeployed(address, chain.chain, log);
-    if (!deployed.ok) throw new Error(deployed.message);
-
-    try {
-      const result = await circle.payService({
-        url,
-        address,
-        data: payload.data,
-        method: httpMethod,
-        chain: chain.chain,
-      });
-      const tx = result.txHash ? ` txHash=${result.txHash}` : '';
-      log(`circle_pay_service ← paid on ${circle.chainLabel(chain.chain)}${tx}`);
-      return JSON.stringify(result);
-    } catch (e) {
-      log(`circle_pay_service ✗ ${(e as Error).message}`);
-      throw e;
-    }
-  },
-});
-
-export const circleGatewayDeposit = tool({
-  name: 'circle_gateway_deposit',
-  description: TOOL_DESCRIPTIONS.circle_gateway_deposit,
-  needsApproval: true,
-  parameters: z.object({
-    url: z.string().describe(PARAM_DESCRIPTIONS.serviceUrl),
-    address: z.string().describe(PARAM_DESCRIPTIONS.address),
-    method: methodEnum.optional().describe(PARAM_DESCRIPTIONS.httpMethod),
-    amount: z.number().positive().describe(PARAM_DESCRIPTIONS.depositAmount),
-  }),
-  execute: async ({ url, address, method, amount }) => {
-    const httpMethod = (method ?? 'GET').toUpperCase();
-    log(`circle_gateway_deposit url=${url} address=${address} amount=${amount}`);
-
-    const chain = await selectGatewayChain(url, httpMethod, log);
-    if (!chain.ok) throw new Error(chain.message);
-
-    const depositMethod = selectDepositMethod(chain.chain);
-    try {
-      const result = await circle.gatewayDeposit({
-        address,
-        amount,
-        chain: chain.chain,
-        method: depositMethod,
-      });
-      log(
-        `circle_gateway_deposit ← ${result.amount} USDC on ${circle.chainLabel(chain.chain)} via ${depositMethod} tx=${result.txId ?? 'n/a'}`,
-      );
-      return JSON.stringify(result);
-    } catch (e) {
-      log(`circle_gateway_deposit ✗ ${(e as Error).message}`);
-      throw e;
-    }
-  },
-});
-
-// ── Auth tools ──────────────────────────────────────────────────────────────
-
-export function buildAuthTools(ask: AskFn) {
-  const loginTool = tool({
-    name: 'circle_login',
-    description: TOOL_DESCRIPTIONS.circle_login,
-    parameters: z.object({}),
-    execute: async () => {
-      log('circle_login');
-      try {
-        const result = await circle.ensureSession({ ask, log, bold });
-        log(`circle_login ← ${result.status}`);
-        return JSON.stringify({ status: result.status });
-      } catch (e) {
-        log(`circle_login ✗ ${(e as Error).message}`);
-        throw e;
-      }
-    },
-  });
-
-  const logoutTool = tool({
-    name: 'circle_logout',
-    description: TOOL_DESCRIPTIONS.circle_logout,
-    parameters: z.object({}),
-    execute: async () => {
-      log('circle_logout');
-      try {
-        await circle.logout(log);
-        return JSON.stringify({ loggedOut: true });
-      } catch (e) {
-        log(`circle_logout ✗ ${(e as Error).message}`);
-        throw e;
-      }
-    },
-  });
-
-  return { loginTool, logoutTool };
-}
+/**
+ * The tool set, in the order the agent sees it.
+ *
+ * Optional arguments are declared `.nullable()` rather than `.optional()`
+ * throughout: this SDK generates strict tool schemas, under which every property
+ * must appear in `required`, and an omitted-versus-null distinction the model
+ * cannot express is nothing the tools need anyway. The bodies map null back to
+ * "not supplied".
+ */
+export const CIRCLE_TOOLS = [shellTool, readFileTool, grepTool];

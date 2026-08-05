@@ -17,23 +17,30 @@
  */
 
 import { Agent } from '@mastra/core/agent';
+import { buildInstructions } from '@agent-stack-starter-kits/kit-core';
+
 import type { KitConfig } from './config';
 import { buildTools, type AskFn } from './tools';
 
 /**
- * Build the Mastra agent for the Autonomous Payment Agent demo.
+ * Build the Mastra agent.
  *
- * Like every kit here it ships no authored instructions. `instructions` is a
- * required field on Mastra's `Agent`, so it is set empty rather than filled
- * with guidance of our own: everything the agent is told to do arrives at
- * runtime from the Circle marketplace's own skill markdown, which the bootstrap
- * prompt fetches on the first turn.
+ * `instructions` is `kit-core`'s prompt: a line of identity, three rules for
+ * working a terminal, and an index of the Circle skills installed on this
+ * machine. There is no playbook of our own — everything about wallets, x402 and
+ * payment comes from those skill documents, which the agent reads with
+ * `read_file` when one turns out to be relevant.
+ *
+ * Mastra takes `instructions` as a function as well as a string, so it could be
+ * re-read per turn; it is resolved once here because this kit builds its agent
+ * once, and a session that installs skills mid-run is told where to find them
+ * (see `kit-core`'s instructions).
  */
-export function buildAgent(config: KitConfig, ask: AskFn): Agent {
+export async function buildAgent(config: KitConfig, ask: AskFn): Promise<Agent> {
   return new Agent({
     id: 'circle-payment-agent',
     name: 'Circle Payment Agent',
-    instructions: '',
+    instructions: await buildInstructions(),
     model: config.model,
     tools: buildTools(ask),
   });

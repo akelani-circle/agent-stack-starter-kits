@@ -16,8 +16,12 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+export * from './approval';
 export * from './balance';
 export * from './commands';
-export * from './skill';
+export * from './fatal';
+export * from './instructions';
+export * from './shell';
+export * from './skills';
 export * from './theme';
 export * from './tools';

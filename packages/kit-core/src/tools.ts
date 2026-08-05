@@ -16,33 +16,118 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import {
-  chainLabel,
-  chooseChain,
-  getServiceAccepts,
-  isWalletDeployed,
-  preferredChain,
-  priceOn,
-  sellerRequiresGateway,
-  type Chain,
-  type GatewayDepositMethod,
-} from '@agent-stack-starter-kits/circle-tools';
+/**
+ * The three tools, and what they do.
+ *
+ * There used to be sixteen: one per Circle operation, each with a typed schema
+ * describing arguments the CLI already describes, each needing the same
+ * preflight logic written again in TypeScript. They have been replaced by a
+ * shell, because that is what Circle's skills are written for and because the
+ * useful surface was never sixteen commands — the agent can now reach `curl`,
+ * `jq`, `npm` and everything else the user has installed, and a Circle command
+ * released tomorrow works here without a change to this repo.
+ *
+ * `read_file` and `grep` are not decoration. A marketplace search is thousands
+ * of lines of JSON schema, past what any tool result should carry, so the agent
+ * redirects it to a file and goes back for the part it needs — the way a person
+ * does. Without a reader, "going back" means running the search again, and on a
+ * paid call that is a second charge.
+ *
+ * The bodies live here rather than in each kit so six frameworks cannot drift
+ * apart on what a tool does or how its failure reads. A kit's `tools.ts` is now
+ * only the adapter between these and its framework's tool API.
+ */
+import { readFile, readdir, stat } from 'node:fs/promises';
+import { homedir } from 'node:os';
+import { isAbsolute, join, relative, resolve, sep } from 'node:path';
 
-import { SETUP_SKILL_URL, SUB_SKILL_CATALOG } from './skill';
-import { bold, colorizeJson, dim, green, red, yellow } from './theme';
+import { parseServiceSearch, type AskFn } from '@agent-stack-starter-kits/circle-tools';
+
+import { describeApproval, requiresApproval } from './approval';
+import { recordServiceSearch } from './commands';
+import { formatShellResult, runShell } from './shell';
+import { bold, dim, green, red, yellow } from './theme';
+
+/** Tool names, single-sourced so a kit's logs and its schema cannot disagree. */
+export const TOOL_NAMES = {
+  SHELL: 'shell',
+  READ_FILE: 'read_file',
+  GREP: 'grep',
+} as const;
 
 /**
- * The two tools that move USDC. Each kit gates these behind human approval —
- * via its framework's own hook where one exists, otherwise via `approveSpend`
- * inside the tool. Named here so the list is single-sourced.
+ * The model-facing description of every tool, single-sourced so the six kits
+ * cannot drift apart on wording.
+ *
+ * These say what each tool does and what its arguments mean — nothing about when
+ * to call it, in what order, or what to do afterwards. That belongs to Circle's
+ * skills, which are the only thing in these kits that instructs the agent.
  */
-export const SPEND_TOOL_NAMES = ['circle_pay_service', 'circle_gateway_deposit'] as const;
+export const TOOL_DESCRIPTIONS = {
+  [TOOL_NAMES.SHELL]:
+    'Run a shell command on the user\'s machine and return everything it prints, stdout and ' +
+    'stderr interleaved, followed by its exit status. Runs in the home directory. This is a real ' +
+    'shell: pipes, redirection, `&&` and command substitution all work, and every program the ' +
+    'user has installed is available, including the `circle` CLI. A non-zero exit is returned as ' +
+    'an ordinary result to read, not an error. Commands that move USDC stop for the user to ' +
+    'approve before they run.',
 
-/** The chains the kits can pay on, in preference order. Kits wrap this in their own zod enum. */
-export const CHAIN_VALUES = ['BASE', 'POLYGON'] as const;
+  [TOOL_NAMES.READ_FILE]:
+    'Read a text file from the machine and return its contents with line numbers. Use it for a ' +
+    'skill document, or to open output a previous command redirected to a file. Reads the whole ' +
+    'file by default; pass offset and limit to read a slice of a large one.',
 
-/** HTTP methods a service endpoint may expect. Kits wrap this in their own zod enum. */
-export const HTTP_METHOD_VALUES = ['GET', 'POST', 'PUT', 'DELETE', 'PATCH'] as const;
+  [TOOL_NAMES.GREP]:
+    'Search file contents for a regular expression and return the matching lines with their file ' +
+    'and line number. Searches a single file, or every text file under a directory. Use it to ' +
+    'find the part you need in output too large to read whole.',
+} as const;
+
+/** Model-facing descriptions of the tool arguments. */
+export const PARAM_DESCRIPTIONS = {
+  command:
+    'The shell command to run, exactly as it would be typed at a terminal. May contain pipes, ' +
+    'redirection and multiple commands joined by `&&` or `;`.',
+
+  filePath: 'Absolute path to the file to read. A path starting with ~ is expanded.',
+
+  offset: 'First line to read, 1-based. Omit to start at the beginning of the file.',
+
+  limit: 'How many lines to read from offset. Omit to read to the end of the file.',
+
+  pattern: 'Regular expression to search for, in JavaScript syntax. Case-insensitive.',
+
+  searchPath:
+    'File to search, or directory to search under. Omit to search the home directory. A path ' +
+    'starting with ~ is expanded.',
+
+  glob:
+    'Only search files whose path matches this glob, e.g. "*.json" or "**/SKILL.md". Omit to ' +
+    'search every text file.',
+} as const;
+
+/** What a tool returns when the user declines the command it was about to run. */
+export const REJECTED_MESSAGE =
+  'The user declined this command, so it did not run and nothing was spent. Do not retry it as ' +
+  'written — ask what they would rather do, or find another way.';
+
+/** The kit-side plumbing a tool body needs. */
+export interface ToolIo {
+  /** Emit a namespaced `[<kit>-kit]` framework line to the scrollback. */
+  log: (line: string) => void;
+  /** Emit an already-formatted line (a command, an argument dump) verbatim. */
+  out?: (line: string) => void;
+  /**
+   * Prompt the user, when approval lives *inside* the tool.
+   *
+   * Frameworks whose tool API can inspect a call's arguments before it runs
+   * (Claude Agent SDK's `canUseTool`, OpenAI Agents' `needsApproval`, ADK's
+   * `beforeToolCallback`) gate there and leave this unset. The rest pass it, and
+   * the gate runs here instead. Either way the decision is the same function —
+   * see `./approval`.
+   */
+  ask?: AskFn;
+}
 
 /** Collapse a value to one line and cap its length, for compact log lines. */
 export function preview(value: string, max = 120): string {
@@ -50,334 +135,258 @@ export function preview(value: string, max = 120): string {
   return oneLine.length > max ? `${oneLine.slice(0, max)}…` : oneLine;
 }
 
-/**
- * The model-facing description of every tool, single-sourced so the six kits
- * cannot drift apart on wording.
- *
- * These describe *what each tool does and what its arguments mean* — nothing
- * about when to call it, in what order, or what to do afterwards. That guidance
- * belongs to the marketplace's own skill markdown (see `skill.ts`), which is the
- * only thing in these kits that instructs the agent. Ordering and safety are
- * enforced in code instead: the preflight helpers below refuse an unpayable
- * call and return an actionable message the model reads back as a tool result.
- */
-export const TOOL_DESCRIPTIONS = {
-  fetch_setup_skill: `Fetch the Circle Agent setup skill from ${SETUP_SKILL_URL}. Equivalent to "curl -sL ${SETUP_SKILL_URL}". Returns its raw markdown.`,
-
-  fetch_sub_skill: `Fetch a Circle Agent sub-skill markdown by name. Available sub-skills:\n${SUB_SKILL_CATALOG}`,
-
-  circle_list_wallets: 'List existing Circle agent wallets on Base. Returns an array of { address }.',
-
-  circle_create_wallet: 'Create a new Circle agent wallet on Base. Returns { address }.',
-
-  circle_get_balance:
-    'Read the USDC and token balances held by a wallet address on a chain. Defaults to Base.',
-
-  circle_deploy_wallet:
-    `Deploy an agent wallet's Smart Contract Account on-chain via a one-time, ` +
-    'zero-value self-transfer. A newly created wallet is counterfactual: it can receive USDC ' +
-    'but cannot sign x402 payments until deployed, and deployment is per-chain. Idempotent and ' +
-    'gas-abstracted: it spends nothing, and on an already-deployed wallet it sends no transaction.',
-
-  circle_wallet_fund:
-    'Fund an agent wallet with testnet USDC on Base. method="crypto" draws from the testnet ' +
-    'faucet; method="fiat" runs the test card flow.',
-
-  circle_fund_fiat:
-    'Generate a Transak on-ramp URL for buying tokens with fiat (card or bank). Returns a `url` ' +
-    'the user opens to complete the purchase, after which the tokens deposit into the wallet on ' +
-    'the chosen chain. This tool only builds the URL and moves no USDC itself. Mainnet only.',
-
-  circle_search_services:
-    'Search the Circle Agent Marketplace for x402-compatible services matching a keyword.',
-
-  circle_inspect_service:
-    'Inspect an x402 service. Returns its price, input schema, HTTP method, and health.',
-
-  fetch_service:
-    'GET a service endpoint without paying. Returns the response status and body, plus ' +
-    '`paymentRequired`, which is true when the endpoint answered HTTP 402 rather than serving ' +
-    'its data for free.',
-
-  circle_get_gateway_balance:
-    "Read the wallet's Circle Gateway balance on a chain: the off-chain batched-payment pool, " +
-    'which is separate from the on-chain balance reported by circle_get_balance. Defaults to Base.',
-
-  circle_pay_service:
-    'Pay for an x402 service with a Circle USDC payment and return the response bought. Settles ' +
-    'on Base or Polygon, picked from the payment options the seller publishes and the wallet ' +
-    "balance on each, and pays under whichever scheme the seller requires — vanilla x402 or " +
-    'Circle Gateway.',
-
-  circle_gateway_deposit:
-    "Move USDC into the wallet's Circle Gateway balance, the pool a seller draws from when it " +
-    "requires Gateway (batched) x402 payments. The chain comes from the service's published " +
-    'Gateway options, Base preferred and Polygon otherwise, and the deposit method follows from ' +
-    'it: Polygon uses eco (~30s, sourced from the wallet\'s Base USDC), Base uses direct (13-19 ' +
-    'min, consumes gas on Base). Spends the deposit amount plus a fee.',
-
-  circle_login:
-    'Log in to the Circle agent wallet with email + OTP, or confirm an existing session. Prompts ' +
-    'in the terminal for the email address and the OTP from the inbox, neither of which is ' +
-    "stored, and never accepts Circle's Terms of Use on the user's behalf. When a session is " +
-    'already valid it changes nothing and reports so.',
-
-  circle_logout:
-    'Log out of the Circle agent wallet and clear its stored credentials. Safe to call when no ' +
-    'session exists, in which case it reports that nothing was logged out.',
-} as const;
-
-/** Model-facing descriptions of the arguments shared by more than one tool. */
-export const PARAM_DESCRIPTIONS = {
-  address: 'Agent wallet address (0x...).',
-
-  chain: 'Chain to act on, BASE or POLYGON. Defaults to BASE.',
-
-  serviceUrl: 'The service URL, exactly as the marketplace publishes it.',
-
-  subSkillName: 'Sub-skill name, without the .md extension.',
-
-  httpMethod:
-    'HTTP method the service expects. A GET service reads the payload as URL query parameters; ' +
-    'POST, PUT and PATCH read it as a JSON request body. Defaults to GET.',
-
-  // A JSON string rather than an object: an open payload object collapses to a
-  // closed, propertyless `{}` under the strict tool schemas these SDKs generate,
-  // so the model could never fill it and every paid call would send an empty
-  // body. A string carries the payload verbatim instead.
-  //
-  // It also states that this argument is where *all* the input goes. That is a
-  // fact about the argument, not sequencing advice, and it has to be here: a
-  // caller that encodes the input into the URL itself leaves this empty, and the
-  // kit then has nothing to substitute into a templated path.
-  dataJson:
-    'JSON-encoded payload object matching the service input schema, e.g. \'{"city":"NYC"}\'. ' +
-    'Every input the service takes belongs here, whatever its HTTP method — do not append ' +
-    'parameters to the URL instead. The kit encodes this onto the request: fields naming a path ' +
-    'parameter are substituted into the URL path, and the rest travel as query parameters on a ' +
-    'GET or as a JSON body on POST, PUT and PATCH. Pass "{}" when the service takes no input.',
-
-  depositAmount:
-    'USDC amount to move into Gateway. A Gateway minimum deposit may apply, and a fee of about ' +
-    '$0.03 is charged on top.',
-
-  fiatAmount: 'Amount of the token to buy, in whole units (e.g. 10 for $10 of USDC).',
-} as const;
-
-/** Discriminated result of a preflight step: a chosen chain, or an error to surface. */
-export type ChainSelection = { ok: true; chain: Chain } | { ok: false; message: string };
-
-/** Discriminated result of a check that either passes or yields an error to surface. */
-export type PreflightCheck = { ok: true } | { ok: false; message: string };
-
-/**
- * Parse a `dataJson` argument into the payload object.
- *
- * Returns the parse failure as a message rather than throwing, so a malformed
- * payload reaches the model as a readable tool result it can correct, instead of
- * crashing the turn.
- */
-export function parsePayload(
-  dataJson: string,
-): { ok: true; data: Record<string, unknown> } | { ok: false; message: string } {
-  try {
-    return { ok: true, data: JSON.parse(dataJson) as Record<string, unknown> };
-  } catch (e) {
-    return {
-      ok: false,
-      message:
-        `dataJson is not valid JSON: ${(e as Error).message}. ` +
-        'Re-check the service input schema reported by circle_inspect_service.',
-    };
-  }
+/** Expand a leading `~` and make a path absolute against the home directory. */
+function resolvePath(path: string): string {
+  const expanded = path.startsWith('~') ? join(homedir(), path.slice(1)) : path;
+  return isAbsolute(expanded) ? expanded : resolve(homedir(), expanded);
 }
 
 /**
- * Confirm the seller publishes a payment option on a chain the kit can pay, and
- * pick which one to use.
+ * Ask the user to approve a command before it runs.
  *
- * Prefers Base but defers to whichever offered chain the wallet can actually
- * afford, so a Polygon-funded wallet is not sent to Base to fail for want of
- * funds. A Solana- or Ethereum-only service is rejected, naming the networks it
- * does offer. Logs its own failure line; the caller decides whether to return or
- * throw the message.
+ * The command is printed verbatim and is the authority; `describeApproval` adds
+ * what kind of thing it is, because a user who is not fluent in the CLI still
+ * has to be able to judge it. Returns true when approved.
  */
-export async function selectPayChain(
-  url: string,
-  method: string,
-  address: string,
-  log: (line: string) => void,
-): Promise<ChainSelection> {
-  try {
-    const accepts = await getServiceAccepts(url, method);
-    const picked = await chooseChain(accepts, address);
-    if (!picked) {
-      const offered = accepts.unsupportedNetworks.join(', ') || 'none';
-      log(`circle_pay_service ✗ no supported pay option (seller offers: ${offered})`);
-      return {
-        ok: false,
-        message:
-          'This service offers no payment option on a chain the kit supports (Base or Polygon). ' +
-          `Seller networks: ${offered}.`,
-      };
-    }
-    return { ok: true, chain: picked };
-  } catch (e) {
-    log(`circle_pay_service ✗ could not read the seller's payment options: ${(e as Error).message}`);
-    return { ok: false, message: (e as Error).message };
-  }
-}
-
-/**
- * Confirm the seller requires a Gateway payment on a chain the kit can pay, and
- * pick which chain to deposit on. A vanilla-x402 seller is rejected, since a
- * Gateway deposit would not help it. Logs its own failure line.
- */
-export async function selectGatewayChain(
-  url: string,
-  method: string,
-  log: (line: string) => void,
-): Promise<ChainSelection> {
-  try {
-    const accepts = await getServiceAccepts(url, method);
-    const picked = preferredChain(accepts);
-    if (!picked || !sellerRequiresGateway(accepts, picked)) {
-      log('circle_gateway_deposit ✗ seller offers no Gateway option on a supported chain');
-      return {
-        ok: false,
-        message:
-          `${url} does not require a Circle Gateway payment on a chain the kit supports, so a ` +
-          'Gateway deposit would not help it. It can be paid with circle_pay_service directly.',
-      };
-    }
-    return { ok: true, chain: picked };
-  } catch (e) {
-    log(`circle_gateway_deposit ✗ ${(e as Error).message}`);
-    return { ok: false, message: (e as Error).message };
-  }
-}
-
-/**
- * Preflight a payment: a counterfactual (undeployed) SCA cannot sign an x402
- * payment, and deployment is per-chain, so check the chain being paid.
- *
- * Surfaces an actionable message instead of the CLI's opaque "Could not sign
- * payment authorization" failure. Detection is best-effort — a flaky RPC must
- * not block a real payment — so a detection error is logged and treated as a pass.
- */
-export async function ensureDeployed(
-  address: string,
-  chain: Chain,
-  log: (line: string) => void,
-): Promise<PreflightCheck> {
-  try {
-    if (!(await isWalletDeployed({ address, chain }))) {
-      log(`circle_pay_service ✗ wallet not deployed on ${chain}`);
-      return {
-        ok: false,
-        message:
-          `Wallet ${address} is not deployed on-chain on ${chainLabel(chain)} yet, so it cannot ` +
-          `sign x402 payments there. circle_deploy_wallet with this address and chain "${chain}" ` +
-          'deploys it, after which this payment can go through.',
-      };
-    }
-    return { ok: true };
-  } catch (e) {
-    log(`circle_pay_service: deployment check skipped (${(e as Error).message})`);
-    return { ok: true };
-  }
-}
-
-/**
- * Pick the Gateway deposit method for a chain. Polygon Gateway sellers get the
- * fast (~30s) eco method, which sources Base USDC and lands on Polygon. Base
- * Gateway sellers must use direct (13-19 min) because eco's destination is
- * hardcoded to Polygon by the CLI.
- */
-export function selectDepositMethod(chain: Chain): GatewayDepositMethod {
-  return chain === 'POLYGON' ? 'eco' : 'direct';
-}
-
-/**
- * One-line, human-first summary of a pending spend, for display above the raw
- * JSON in an approval prompt. The tool args alone don't carry the price: it is
- * resolved live from the seller's x402 challenge at pay time, not passed in.
- *
- * The numbers here come from the same calls the spend itself is about to make —
- * `getServiceAccepts` for the challenge, then `chooseChain`/`preferredChain` for
- * the chain — because an approval prompt that quotes a different source than the
- * one being charged is worse than no prompt at all. A marketplace listing or an
- * `inspectService` result would both be cheaper to read and neither is
- * reconciled against the chain this payment will settle on, so either can show a
- * price the wallet is not about to be charged.
- *
- * The service is identified by URL rather than by its published name for the
- * same reason: the URL is what gets paid, while the name is a seller-controlled
- * string and so is exactly the field a bad listing would dress up to look like
- * something else.
- *
- * Best-effort: any lookup failure returns null so the caller falls back to the
- * raw JSON dump alone rather than blocking or misrepresenting the approval.
- */
-export async function describeSpend(
-  toolName: string,
-  args: Record<string, unknown>,
-): Promise<string | null> {
-  const url = String(args.url ?? '');
-  const method = String(args.method ?? 'GET').toUpperCase();
-  try {
-    if (toolName === 'circle_pay_service') {
-      const accepts = await getServiceAccepts(url, method);
-      // Mirrors `selectPayChain`: prefer the chain the wallet can actually
-      // afford, falling back to seller preference when there's no address to
-      // weigh balances against.
-      const address = String(args.address ?? '');
-      const chain = address ? await chooseChain(accepts, address) : preferredChain(accepts);
-      if (!chain) return null;
-      const usdc = priceOn(accepts, chain);
-      const price = usdc === null ? dim('(price unknown)') : bold(`${usdc} USDC`);
-      return `${bold('pay')} ${price} on ${chainLabel(chain)}\n${dim(url)}`;
-    }
-    if (toolName === 'circle_gateway_deposit') {
-      const amount = Number(args.amount);
-      if (!Number.isFinite(amount)) return null;
-      // Mirrors `selectGatewayChain` + `selectDepositMethod`. The method is
-      // worth showing: eco settles in ~30s, direct takes 13-19 minutes, and
-      // that difference is the main thing a human is agreeing to here.
-      const accepts = await getServiceAccepts(url, method);
-      const chain = preferredChain(accepts);
-      if (!chain) return null;
-      return (
-        `${bold('gateway deposit')} ${bold(`${amount} USDC`)} on ${chainLabel(chain)} ` +
-        `via ${selectDepositMethod(chain)}\n${dim(`for ${url}`)}`
-      );
-    }
-  } catch {
-    return null;
-  }
-  return null;
-}
-
-/**
- * Prompt the user to approve or reject a spend tool before it touches USDC.
- *
- * For the frameworks whose tool API has no external approval hook, so the
- * human-in-the-loop has to live inside the spend tool itself: the agent calls
- * the tool normally, execution pauses on `await ask(...)`, and only proceeds
- * once the human approves. Returns true when approved.
- */
-export async function approveSpend(
-  ask: (q: string) => Promise<string>,
-  name: string,
-  args: Record<string, unknown>,
-  log: (line: string) => void,
-): Promise<boolean> {
-  log(yellow(`approval required for tool: ${bold(name)}`));
-  const summary = await describeSpend(name, args);
-  if (summary) console.log(summary);
-  console.log(colorizeJson(args));
+export async function approveCommand(ask: AskFn, command: string, io: ToolIo): Promise<boolean> {
+  const out = io.out ?? ((line: string) => console.log(line));
+  io.log(yellow('approval required before this runs:'));
+  out(`  ${bold(command)}`);
+  const reason = describeApproval(command);
+  if (reason) out(`  ${dim(reason)}`);
   const answer = (await ask(bold('Approve? [y/N] '))).trim().toLowerCase();
   const approved = answer === 'y' || answer === 'yes';
-  log(approved ? green('approved by user') : red('rejected by user'));
+  io.log(approved ? green('approved by user') : red('rejected by user'));
   return approved;
+}
+
+/**
+ * Keep a numbered service quick-pick pointing at the search that actually ran.
+ *
+ * `/discover` arms the list itself, but the agent runs its own searches in the
+ * shell, and after one of those a bare "2" at the prompt should mean the second
+ * result the user just read. Sniffing the output is how that survives the move
+ * away from a typed search tool: there is no longer a `circle_search_services`
+ * to hook. Silent by contract — output that is not a search payload parses to
+ * nothing and leaves the previous list alone.
+ */
+function armQuickPickFromSearch(command: string, output: string): void {
+  if (!/\bcircle\s+services\s+search\b/.test(command)) return;
+  const services = parseServiceSearch(output);
+  if (services.length > 0) recordServiceSearch(services);
+}
+
+/**
+ * Run a shell command, gating it on the user first when this kit's framework
+ * cannot gate it earlier.
+ */
+export async function executeShell(command: string, io: ToolIo): Promise<string> {
+  io.log(`${TOOL_NAMES.SHELL} ${preview(command)}`);
+
+  if (io.ask && requiresApproval(command)) {
+    if (!(await approveCommand(io.ask, command, io))) return REJECTED_MESSAGE;
+  }
+
+  let result;
+  try {
+    result = await runShell(command);
+  } catch (e) {
+    // The shell itself could not be started. Distinct from a command that ran
+    // and failed, and worth saying so: retrying will not fix it.
+    const message = (e as Error).message;
+    io.log(`${TOOL_NAMES.SHELL} ✗ ${message}`);
+    return `The shell could not be started: ${message}`;
+  }
+
+  armQuickPickFromSearch(command, result.output);
+
+  const seconds = (result.durationMs / 1000).toFixed(1);
+  const status = result.timedOut ? 'timed out' : `exit ${String(result.exitCode)}`;
+  io.log(`${TOOL_NAMES.SHELL} ← ${status} (${seconds}s, ${result.output.length} chars)`);
+  return formatShellResult(result);
+}
+
+/** Cap on what one file read hands back, for the same reason the shell has one. */
+const MAX_READ_CHARS = 30_000;
+
+export interface ReadFileArgs {
+  filePath: string;
+  offset?: number;
+  limit?: number;
+}
+
+/**
+ * Read a text file, numbered from its real line numbers.
+ *
+ * Numbering is not cosmetic: it is what lets the agent ask for the next slice of
+ * a file it has only partly read, and what makes a `grep` hit and a `read_file`
+ * offset refer to the same place.
+ */
+export async function executeReadFile(args: ReadFileArgs, io: ToolIo): Promise<string> {
+  const path = resolvePath(args.filePath);
+  const slice = args.offset || args.limit ? ` offset=${args.offset ?? 1} limit=${args.limit ?? '∞'}` : '';
+  io.log(`${TOOL_NAMES.READ_FILE} ${preview(path)}${slice}`);
+
+  let contents: string;
+  try {
+    contents = await readFile(path, 'utf8');
+  } catch (e) {
+    const message = (e as NodeJS.ErrnoException).code === 'ENOENT'
+      ? `No such file: ${path}`
+      : `Could not read ${path}: ${(e as Error).message}`;
+    io.log(`${TOOL_NAMES.READ_FILE} ✗ ${message}`);
+    return message;
+  }
+
+  const lines = contents.split('\n');
+  const from = Math.max(1, args.offset ?? 1);
+  const to = args.limit ? from + args.limit - 1 : lines.length;
+  const selected = lines.slice(from - 1, to);
+  if (selected.length === 0) {
+    return `${path} has ${lines.length} lines; nothing to read from line ${from}.`;
+  }
+
+  const width = String(from + selected.length - 1).length;
+  let body = selected
+    .map((line, i) => `${String(from + i).padStart(width, ' ')}\t${line}`)
+    .join('\n');
+
+  let note = '';
+  if (body.length > MAX_READ_CHARS) {
+    body = body.slice(0, MAX_READ_CHARS);
+    note =
+      `\n\n[cut at ${MAX_READ_CHARS} characters. Read on with offset and limit, or narrow it ` +
+      'down with grep.]';
+  } else if (to < lines.length) {
+    note = `\n\n[lines ${from}-${to} of ${lines.length}. Continue with offset ${to + 1}.]`;
+  }
+
+  io.log(`${TOOL_NAMES.READ_FILE} ← ${selected.length} lines`);
+  return body + note;
+}
+
+/** Directories never worth walking; everything else, including dotted ones, is. */
+const SKIPPED_DIRS = new Set(['node_modules', '.git', '.cache', '.Trash', 'Cache', 'CacheStorage']);
+/** Bounds on one search, so a pattern aimed at a home directory still returns. */
+const MAX_FILES_SCANNED = 8_000;
+const MAX_MATCHES = 100;
+const MAX_FILE_BYTES = 2 * 1024 * 1024;
+const MAX_WALK_DEPTH = 12;
+
+/** Translate a glob into a regular expression over the path, `**` crossing separators. */
+function globToRegExp(glob: string): RegExp {
+  const source = glob
+    .split(/(\*\*\/|\*\*|\*|\?)/)
+    .map((part) => {
+      if (part === '**/') return '(?:.*/)?';
+      if (part === '**') return '.*';
+      if (part === '*') return '[^/]*';
+      if (part === '?') return '[^/]';
+      return part.replace(/[.+^${}()|[\]\\]/g, '\\$&');
+    })
+    .join('');
+  // Unanchored on the left so a bare "*.json" matches at any depth, which is
+  // what a caller writing that means.
+  return new RegExp(`(?:^|/)${source}$`);
+}
+
+/** True when the head of a file looks binary, so it is never scanned as text. */
+function isBinary(buffer: Buffer): boolean {
+  return buffer.subarray(0, 1024).includes(0);
+}
+
+export interface GrepArgs {
+  pattern: string;
+  searchPath?: string;
+  glob?: string;
+}
+
+async function* walk(root: string, depth = 0): AsyncGenerator<string> {
+  if (depth > MAX_WALK_DEPTH) return;
+  let entries;
+  try {
+    entries = await readdir(root, { withFileTypes: true });
+  } catch {
+    return;
+  }
+  for (const entry of entries) {
+    const path = join(root, entry.name);
+    // Symlinked directories are not followed: a loop through one turns a search
+    // into a hang, and the registry symlinks skills into place.
+    if (entry.isDirectory()) {
+      if (!SKIPPED_DIRS.has(entry.name)) yield* walk(path, depth + 1);
+    } else if (entry.isFile() || entry.isSymbolicLink()) {
+      yield path;
+    }
+  }
+}
+
+/** Search one file, appending `path:line: text` for each hit. */
+async function grepFile(path: string, re: RegExp, into: string[]): Promise<void> {
+  let buffer: Buffer;
+  try {
+    const info = await stat(path);
+    if (!info.isFile() || info.size > MAX_FILE_BYTES) return;
+    buffer = await readFile(path);
+  } catch {
+    return;
+  }
+  if (isBinary(buffer)) return;
+  const lines = buffer.toString('utf8').split('\n');
+  for (let i = 0; i < lines.length && into.length < MAX_MATCHES; i++) {
+    const line = lines[i] ?? '';
+    if (re.test(line)) into.push(`${path}:${i + 1}: ${preview(line, 300)}`);
+    // `re` is built without /g, so lastIndex never carries between lines.
+  }
+}
+
+/** Search file contents for a pattern, over a file or a directory tree. */
+export async function executeGrep(args: GrepArgs, io: ToolIo): Promise<string> {
+  const root = resolvePath(args.searchPath ?? homedir());
+  io.log(
+    `${TOOL_NAMES.GREP} ${preview(args.pattern, 60)} in ${preview(root)}` +
+      (args.glob ? ` glob=${args.glob}` : ''),
+  );
+
+  let re: RegExp;
+  try {
+    re = new RegExp(args.pattern, 'i');
+  } catch (e) {
+    const message = `Not a valid regular expression: ${(e as Error).message}`;
+    io.log(`${TOOL_NAMES.GREP} ✗ ${message}`);
+    return message;
+  }
+
+  let info;
+  try {
+    info = await stat(root);
+  } catch {
+    const message = `No such file or directory: ${root}`;
+    io.log(`${TOOL_NAMES.GREP} ✗ ${message}`);
+    return message;
+  }
+
+  const matches: string[] = [];
+  let scanned = 0;
+  if (info.isFile()) {
+    await grepFile(root, re, matches);
+    scanned = 1;
+  } else {
+    const include = args.glob ? globToRegExp(args.glob) : null;
+    for await (const path of walk(root)) {
+      if (matches.length >= MAX_MATCHES || scanned >= MAX_FILES_SCANNED) break;
+      // Match the glob against the path relative to the search root, so a
+      // pattern is written against what the caller asked about.
+      if (include && !include.test(relative(root, path).split(sep).join('/'))) continue;
+      scanned++;
+      await grepFile(path, re, matches);
+    }
+  }
+
+  io.log(`${TOOL_NAMES.GREP} ← ${matches.length} matches in ${scanned} files`);
+  if (matches.length === 0) {
+    return `No matches for /${args.pattern}/ under ${root}${args.glob ? ` (glob ${args.glob})` : ''}.`;
+  }
+  const capped = matches.length >= MAX_MATCHES ? `\n\n[stopped at ${MAX_MATCHES} matches]` : '';
+  return matches.join('\n') + capped;
 }

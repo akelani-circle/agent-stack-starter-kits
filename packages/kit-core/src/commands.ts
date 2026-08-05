@@ -31,8 +31,8 @@
  * number ("2") at the next prompt can stand in for retyping a service name/URL.
  * That still goes to the agent as a normal turn (it may inspect or pay, subject
  * to the existing approval gate), it just saves the typing. The list is fed by
- * `/discover` and by the agent's own `circle_search_services` alike, and stays
- * addressable only until the next turn reaches the agent — see
+ * `/discover` and by any `circle services search` the agent runs in its shell
+ * alike, and stays addressable only until the next turn reaches the agent — see
  * `recordServiceSearch` and `disarmQuickPick`.
  */
 import * as circle from '@agent-stack-starter-kits/circle-tools';
@@ -60,20 +60,21 @@ export interface CommandOutcome {
  * list when the shortcut is not in scope (see `disarmQuickPick`).
  *
  * Module-level rather than router state because there are two writers: this
- * file's `/discover`, and every kit's `circle_search_services` tool, which is
- * built independently of — and usually before — the router. A kit runs one agent
- * session per process, so exactly one list is ever in scope.
+ * file's `/discover`, and the shell tool's sniffer over the agent's own
+ * `circle services search` output, which runs independently of — and usually
+ * before — the router. A kit runs one agent session per process, so exactly one
+ * list is ever in scope.
  */
 let lastServices: circle.Service[] = [];
 
 /**
  * Publish search results as the quick-pick list.
  *
- * Called by `/discover` and by each kit's `circle_search_services` tool, so a
- * number resolves against whichever search actually ran last — including one the
- * agent ran on its own. Routing it through the tool rather than reading it back
- * out of each framework's message history keeps this to one line per kit and
- * avoids depending on six different tool-result encodings.
+ * Called by `/discover` and by the shell tool when it sees a marketplace search
+ * go past, so a number resolves against whichever search actually ran last —
+ * including one the agent ran on its own. Sniffing the shell is what keeps this
+ * working now that no typed search tool exists to hook, and it costs one call
+ * site rather than six different tool-result encodings.
  */
 export function recordServiceSearch(services: circle.Service[]): void {
   lastServices = services;
@@ -170,15 +171,15 @@ export function createCommandRouter(ctx: CommandContext) {
           ctx.out(HELP);
           break;
         case 'wallets':
-          ctx.log('circle_list_wallets');
+          ctx.log('circle wallet list');
           await showWallets();
           break;
         case 'balance':
-          ctx.log('circle_get_balance (all wallets)');
+          ctx.log('circle wallet balance (all wallets)');
           await showBalance();
           break;
         case 'gateway':
-          ctx.log('circle_get_gateway_balance');
+          ctx.log('circle gateway balance');
           await showGateway();
           break;
         case 'discover':
@@ -186,7 +187,7 @@ export function createCommandRouter(ctx: CommandContext) {
             ctx.log(yellow('usage: /discover <keyword>'));
             break;
           }
-          ctx.log(`circle_search_services keyword="${arg}"`);
+          ctx.log(`circle services search "${arg}"`);
           await discover(arg);
           break;
         default:

@@ -16,57 +16,36 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { Agent } from '@openai/agents';
+import { Agent, setDefaultOpenAIKey } from '@openai/agents';
+import { buildInstructions } from '@agent-stack-starter-kits/kit-core';
+
 import type { KitConfig } from './config';
-import {
-  fetchSetupSkillTool,
-  fetchSubSkillTool,
-  circleCreateWallet,
-  circleListWallets,
-  circleGetBalance,
-  circleWalletFund,
-  fetchServiceTool,
-  circleDeployWallet,
-  fundFiatTool,
-  circleGetGatewayBalance,
-  circleSearchServices,
-  circleInspectService,
-  circlePayService,
-  circleGatewayDeposit,
-  buildAuthTools,
-  type AskFn,
-} from './tools';
+import { CIRCLE_TOOLS } from './tools';
 
 /**
- * Build the OpenAI Agents SDK agent for the Autonomous Payment Agent demo.
+ * Build the OpenAI Agents SDK agent.
  *
- * No `instructions` are set, and none are needed: the SDK leaves the system
- * prompt empty when the field is omitted. Everything the agent is told to do
- * arrives at runtime from the Circle marketplace's own skill markdown, which
- * the bootstrap prompt fetches on the first turn.
+ * `instructions` is `kit-core`'s prompt: a line of identity, three rules for
+ * working a terminal, and an index of the Circle skills installed on this
+ * machine. There is no playbook of our own — everything about wallets, x402 and
+ * payment comes from those skill documents, which the agent reads with
+ * `read_file` when one turns out to be relevant.
+ *
+ * Human-in-the-loop lives on the tools rather than here: `needsApproval` on the
+ * shell tool asks whether *this command* spends, and a true answer interrupts
+ * the run for `index.ts` to resolve.
+ *
+ * The key is handed to the SDK explicitly rather than left to its own read of
+ * `process.env`, so the one place a key is resolved is `config.ts` — the same
+ * arrangement as the other kits.
  */
-export function buildAgent(config: KitConfig, ask: AskFn): Agent {
-  const { loginTool, logoutTool } = buildAuthTools(ask);
+export async function buildAgent(config: KitConfig): Promise<Agent> {
+  setDefaultOpenAIKey(config.providerApiKey);
+
   return new Agent({
     name: 'Circle Payment Agent',
     model: config.model,
-    tools: [
-      loginTool,
-      logoutTool,
-      fetchSetupSkillTool,
-      fetchSubSkillTool,
-      circleCreateWallet,
-      circleListWallets,
-      circleGetBalance,
-      circleWalletFund,
-      fetchServiceTool,
-      circleDeployWallet,
-      fundFiatTool,
-      circleGetGatewayBalance,
-      circleSearchServices,
-      circleInspectService,
-      circlePayService,
-      circleGatewayDeposit,
-    ],
+    instructions: await buildInstructions(),
+    tools: CIRCLE_TOOLS,
   });
 }

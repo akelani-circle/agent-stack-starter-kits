@@ -24,28 +24,27 @@ import {
   type SDKUserMessage,
 } from '@anthropic-ai/claude-agent-sdk';
 import { createChatUi, type ChatUi } from '@agent-stack-starter-kits/agent-cli';
-import { ensureSession, type AskFn } from '@agent-stack-starter-kits/circle-tools';
+import {
+  ensureSession,
+  parseServiceSearch,
+  type AskFn,
+} from '@agent-stack-starter-kits/circle-tools';
 
 import {
-  BOOTSTRAP_PROMPT,
+  approveCommand,
+  buildInitialPrompt,
   createBalanceReadout,
   createCommandRouter,
-  describeSpend,
+  isProviderOverloaded,
+  preview,
+  recordServiceSearch,
+  reportFatal,
+  requiresApproval,
+  REJECTED_MESSAGE,
 } from '@agent-stack-starter-kits/kit-core';
-import { buildQueryOptions } from './agent';
+import { buildQueryOptions, SHELL_TOOL } from './agent';
 import { loadConfig } from './config';
-import {
-  bold,
-  colorizeJson,
-  dim,
-  green,
-  heading,
-  humanizeLatexSymbols,
-  kitLine,
-  red,
-  yellow,
-} from './theme';
-import { SPEND_TOOLS } from './tools';
+import { bold, dim, heading, kitLine, red, streamedBlock, yellow } from './theme';
 
 // The chat UI pins the input to the bottom while logs scroll above it. It is
 // created in main(); the module-level handle lets the fatal handler close it
@@ -70,32 +69,85 @@ function out(line: string): void {
 // passed as a getter because it only exists once main() creates the chat UI.
 const balance = createBalanceReadout(() => ui);
 
-/** True when an error string is an Anthropic "Overloaded" (HTTP 529). The
- * underlying Claude Code subprocess retries 529 itself (those retries surface
- * via the wired stderr); this only classifies the message once retries are
- * exhausted so it reads as a transient provider hiccup, not a kit bug. */
-function isOverloaded(text: string): boolean {
-  return text.includes('529') || /overloaded/i.test(text);
-}
-
 /** Wrap a turn of user text as the streaming-input message the SDK expects. */
 function userMessage(text: string): SDKUserMessage {
   return { type: 'user', message: { role: 'user', content: text }, parent_tool_use_id: null };
 }
 
 /**
- * Print the agent's text for one assistant message. Tool calls log themselves
- * from inside the tool handlers (`[tool] ...`), so only the model's prose is
- * printed here, under a per-turn heading.
+ * Marketplace searches the agent has run and whose output has not come back yet,
+ * keyed by tool-use id.
+ *
+ * The other kits arm the numbered quick-pick from inside their own shell tool,
+ * where the command and its output are one function call apart. Here the shell
+ * is the SDK's, so the two arrive as separate messages — the command on an
+ * assistant message, the output on the user message that answers it — and the id
+ * is what ties them back together.
+ */
+const pendingSearches = new Set<string>();
+
+/**
+ * Print one assistant message: the model's prose under a per-turn heading, and a
+ * line for each tool it reached for.
+ *
+ * The tool lines matter more here than they look. This kit's tools are the SDK's
+ * own, so nothing logs itself the way a hand-written tool body would, and
+ * without this the terminal would show a long silence and then a conclusion,
+ * with no sign of the commands that produced it.
+ *
+ * NOTE: prose prints in the `--- agent ---` frame rather than the
+ * `--- agent reply ---` one the other five kits close a turn with. Those kits
+ * invoke discretely and so have a single final answer to frame; this one
+ * streams, and every text block arrives the same way, with no marker on the
+ * stream that says which is the last. Showing them as they land is the point of
+ * a streaming session, so they are all framed as mid-turn prose.
  */
 function printAssistant(msg: Extract<SDKMessage, { type: 'assistant' }>): void {
   const content = msg.message.content;
   const blocks = Array.isArray(content) ? content : [];
   for (const block of blocks) {
     if (block.type === 'text' && block.text.trim()) {
-      out(`\n${heading('--- agent ---')}\n`);
-      out(humanizeLatexSymbols(block.text.trimEnd()));
+      out(streamedBlock(block.text));
+    } else if (block.type === 'tool_use') {
+      const input = (block.input ?? {}) as Record<string, unknown>;
+      const detail =
+        typeof input.command === 'string'
+          ? input.command
+          : typeof input.file_path === 'string'
+            ? input.file_path
+            : typeof input.pattern === 'string'
+              ? input.pattern
+              : '';
+      log(`${block.name}${detail ? ` ${preview(detail)}` : ''}`);
+      if (
+        block.name === SHELL_TOOL &&
+        typeof input.command === 'string' &&
+        /\bcircle\s+services\s+search\b/.test(input.command)
+      ) {
+        pendingSearches.add(block.id);
+      }
     }
+  }
+}
+
+/**
+ * Re-arm the numbered quick-pick from a marketplace search the agent ran itself,
+ * so a bare "2" at the next prompt means the second result it just printed.
+ * Silent by contract: output that is not a search payload leaves the list alone.
+ */
+function noteToolResults(msg: Extract<SDKMessage, { type: 'user' }>): void {
+  const content = msg.message.content;
+  if (!Array.isArray(content)) return;
+  for (const block of content) {
+    if (block.type !== 'tool_result' || !pendingSearches.delete(block.tool_use_id)) continue;
+    const text =
+      typeof block.content === 'string'
+        ? block.content
+        : (block.content ?? [])
+            .map((part) => (part.type === 'text' ? part.text : ''))
+            .join('\n');
+    const services = parseServiceSearch(text);
+    if (services.length > 0) recordServiceSearch(services);
   }
 }
 
@@ -106,7 +158,10 @@ function printResult(msg: Extract<SDKMessage, { type: 'result' }>): void {
     log(dim(`turn complete (${secs}s, $${msg.total_cost_usd.toFixed(4)})`));
   } else {
     log(red(`turn ended: ${msg.subtype} (${secs}s)`));
-    if (msg.errors.some(isOverloaded)) {
+    // The Claude Code subprocess retries 529 itself (those retries surface via
+    // the wired stderr), so a 529 that reaches here means retries ran out —
+    // transient on the provider's side, not a kit bug.
+    if (msg.errors.some(isProviderOverloaded)) {
       log(yellow('The LLM provider is overloaded (HTTP 529). This is transient; try again in a moment.'));
     }
     for (const e of msg.errors) out(red(e));
@@ -121,7 +176,7 @@ async function main(): Promise<void> {
 
   log('Autonomous Payment Agent demo starting');
   const config = loadConfig();
-  log(`chain=BASE model=${config.model} auth=ANTHROPIC_API_KEY`);
+  log(`provider=${config.provider} model=${config.model}`);
 
   // Every prompt (chat input, approval [y/N], email/OTP) flows through the same
   // pinned input box the chat UI renders at the bottom of the terminal.
@@ -137,25 +192,20 @@ async function main(): Promise<void> {
     return answer;
   };
 
-  // Human-in-the-loop, the SDK-native mirror of LangChain's interruptOn: the
-  // permission handler approves every read-only tool and pauses for a y/N on the
-  // two USDC-spending tools before they run.
+  // Human-in-the-loop. `canUseTool` is the SDK-native place for it, and it sees
+  // the tool's arguments — which is what the gate now needs, because with a
+  // shell the thing worth stopping is a command, not a tool. Everything but the
+  // shell is auto-allowed in agent.ts and never reaches this; a shell command
+  // that spends stops for a y/N, and every other one runs.
   const canUseTool: CanUseTool = async (toolName, input): Promise<PermissionResult> => {
-    if (!SPEND_TOOLS.includes(toolName as (typeof SPEND_TOOLS)[number])) {
+    const command = String((input as { command?: unknown }).command ?? '');
+    if (toolName !== SHELL_TOOL || !requiresApproval(command)) {
       return { behavior: 'allow', updatedInput: input };
     }
-    log(yellow(`approval required for tool: ${bold(toolName)}`));
-    const summary = await describeSpend(toolName, input);
-    if (summary) out(summary);
-    out(colorizeJson(input));
-    const answer = (await ask(bold('Approve this action? [y/N] '))).trim().toLowerCase();
-    const approved = answer === 'y' || answer === 'yes';
-    if (approved) {
-      log(green('approved by user'));
+    if (await approveCommand(ask, command, { log, out })) {
       return { behavior: 'allow', updatedInput: input };
     }
-    log(red('rejected by user'));
-    return { behavior: 'deny', message: 'User rejected this action.' };
+    return { behavior: 'deny', message: REJECTED_MESSAGE };
   };
 
   // Streaming input: the bootstrap prompt drives turn one; thereafter the result
@@ -179,10 +229,12 @@ async function main(): Promise<void> {
     });
   }
 
-  // The marketplace's own bootstrap prompt. setup.md drives the first turn.
+  // On a machine with no skills this is Circle's own bootstrap line, so the
+  // first turn installs them; otherwise it is a status check.
+  const initialPrompt = await buildInitialPrompt();
 
   async function* inputStream(): AsyncGenerator<SDKUserMessage> {
-    yield userMessage(BOOTSTRAP_PROMPT);
+    yield userMessage(initialPrompt);
     while (true) {
       const next = await nextInput();
       if (next === null) return;
@@ -204,7 +256,7 @@ async function main(): Promise<void> {
   chat.setStatus('working…');
   const session = query({
     prompt: inputStream(),
-    options: buildQueryOptions(config, canUseTool, ask),
+    options: await buildQueryOptions(config, canUseTool),
   });
 
   // One `query` call is the whole conversation: the SDK keeps full context
@@ -221,6 +273,8 @@ async function main(): Promise<void> {
   for await (const msg of session) {
     if (msg.type === 'assistant') {
       printAssistant(msg);
+    } else if (msg.type === 'user') {
+      noteToolResults(msg);
     } else if (msg.type === 'result') {
       printResult(msg);
       chat.setStatus(null);
@@ -261,17 +315,6 @@ main().catch((err: unknown) => {
   // Tear down the UI first so the console is restored before we print the
   // failure; otherwise these lines would be swallowed by the Ink frame.
   ui?.close();
-  const message = err instanceof Error ? err.message : String(err);
-  // A 529 means the LLM provider is overloaded after retries were exhausted: it
-  // is transient and not a kit bug, so say so plainly instead of dumping raw JSON.
-  const overloaded = (err as { status?: number })?.status === 529 || isOverloaded(message);
-  if (overloaded) {
-    console.error(
-      kitLine(red('FATAL: the LLM provider is overloaded (HTTP 529) and retries were exhausted.')),
-    );
-    console.error(kitLine(yellow('This is transient on the provider side. Re-run in a moment.')));
-  } else {
-    console.error(kitLine(red(`FATAL: ${message}`)));
-  }
+  reportFatal(err, kitLine);
   process.exit(1);
 });

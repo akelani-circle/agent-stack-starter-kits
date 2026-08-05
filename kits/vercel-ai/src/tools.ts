@@ -16,445 +16,74 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+/**
+ * The Vercel AI SDK adapter: three tools, no logic.
+ *
+ * Every body here is one call into `kit-core`, which is the point. What a shell
+ * command does, how a truncated result reads, when a spend stops for the user —
+ * all of that is identical across the six kits, so it lives in one place and
+ * this file is only the shape the AI SDK wants it in.
+ *
+ * Approval is in-tool, which is this SDK's idiom: `generateText` has no external
+ * per-call permission hook, so the gate runs inside `executeShell` when `ask` is
+ * present. The `kit-core` bodies also never throw for an ordinary failure, which
+ * matters more here than elsewhere — a tool that throws inside `generateText`
+ * takes the whole call down with it rather than letting the model read the error
+ * and recover.
+ */
 import { tool } from 'ai';
 import { z } from 'zod';
-import * as circle from '@agent-stack-starter-kits/circle-tools';
+import type { AskFn as CircleAskFn } from '@agent-stack-starter-kits/circle-tools';
 import {
-  approveSpend,
-  ensureDeployed,
-  fetchSetupSkill,
-  fetchSubSkill,
-  parsePayload,
-  preview,
-  recordServiceSearch,
-  selectDepositMethod,
-  selectGatewayChain,
-  selectPayChain,
-  CHAIN_VALUES,
-  HTTP_METHOD_VALUES,
+  executeGrep,
+  executeReadFile,
+  executeShell,
   PARAM_DESCRIPTIONS,
-  SETUP_SKILL_URL,
-  SUB_SKILL_NAMES,
   TOOL_DESCRIPTIONS,
-  type SubSkillName,
+  TOOL_NAMES,
+  type ToolIo,
 } from '@agent-stack-starter-kits/kit-core';
-import { bold, toolLine } from './theme';
+import { toolLine } from './theme';
 
 /** How the kits prompt a human; shared so prompt options (e.g. the OTP's
  * `echo: false`) survive the trip from a tool down to the chat UI. */
-export type AskFn = circle.AskFn;
+export type AskFn = CircleAskFn;
 
-const subSkillEnum = z.enum(SUB_SKILL_NAMES as [SubSkillName, ...SubSkillName[]]);
-const chainEnum = z.enum(CHAIN_VALUES);
-const methodEnum = z.enum(HTTP_METHOD_VALUES);
-
-function log(line: string): void {
-  console.log(toolLine(line));
-}
-
-/**
- * Format a caught error for return.
- *
- * In the Vercel AI SDK, when a tool's `execute` function *throws*, the error
- * bubbles up through `generateText` all the way to the caller — the model never
- * sees it and the process crashes. Returning `{ error }` instead gives the model
- * the failure information as a tool result so it can diagnose and recover
- * without any external retry or interruption mechanism.
- */
-function toolError(e: unknown): { error: string } {
-  return { error: e instanceof Error ? e.message : String(e) };
-}
-
-/**
- * Build the Vercel AI SDK tool set.
- *
- * The `ask` parameter is threaded into the two spend tools
- * (circle_pay_service, circle_gateway_deposit) so they can pause and ask the
- * human for approval before touching USDC. This is the Vercel AI SDK approach
- * to human-in-the-loop: approval logic lives INSIDE the `execute` function of
- * the tool itself, rather than in an external hook like LangChain's
- * `interruptOn` or the Claude Agent SDK's `canUseTool`.
- */
+/** Build the Vercel AI SDK tool set. */
 export function buildTools(ask: AskFn) {
+  const io: ToolIo = {
+    log: (line) => console.log(toolLine(line)),
+    out: (line) => console.log(line),
+    ask,
+  };
+
   return {
-    // ── Auth tools ────────────────────────────────────────────────────────────
-
-    circle_login: tool({
-      description: TOOL_DESCRIPTIONS.circle_login,
-      parameters: z.object({}),
-      execute: async () => {
-        log('circle_login');
-        try {
-          const result = await circle.ensureSession({ ask, log, bold });
-          log(`circle_login ← ${result.status}`);
-          return { status: result.status };
-        } catch (e) {
-          log(`circle_login ✗ ${(e as Error).message}`);
-          return toolError(e);
-        }
-      },
-    }),
-
-    circle_logout: tool({
-      description: TOOL_DESCRIPTIONS.circle_logout,
-      parameters: z.object({}),
-      execute: async () => {
-        log('circle_logout');
-        try {
-          await circle.logout(log);
-          return { loggedOut: true };
-        } catch (e) {
-          log(`circle_logout ✗ ${(e as Error).message}`);
-          return toolError(e);
-        }
-      },
-    }),
-
-    // ── Skill fetchers ────────────────────────────────────────────────────────
-
-    fetch_setup_skill: tool({
-      description: TOOL_DESCRIPTIONS.fetch_setup_skill,
-      parameters: z.object({}),
-      execute: async () => {
-        log(`fetch_setup_skill → ${SETUP_SKILL_URL}`);
-        try {
-          const body = await fetchSetupSkill();
-          log(`fetch_setup_skill ← ${body.length} bytes`);
-          return body;
-        } catch (e) {
-          log(`fetch_setup_skill ✗ ${(e as Error).message}`);
-          return toolError(e);
-        }
-      },
-    }),
-
-    fetch_sub_skill: tool({
-      description: TOOL_DESCRIPTIONS.fetch_sub_skill,
+    [TOOL_NAMES.SHELL]: tool({
+      description: TOOL_DESCRIPTIONS[TOOL_NAMES.SHELL],
       parameters: z.object({
-        name: subSkillEnum.describe(PARAM_DESCRIPTIONS.subSkillName),
+        command: z.string().describe(PARAM_DESCRIPTIONS.command),
       }),
-      execute: async ({ name }) => {
-        log(`fetch_sub_skill name=${name}`);
-        try {
-          const body = await fetchSubSkill(name);
-          log(`fetch_sub_skill ← ${body.length} bytes`);
-          return body;
-        } catch (e) {
-          log(`fetch_sub_skill ✗ ${(e as Error).message}`);
-          return toolError(e);
-        }
-      },
+      execute: ({ command }) => executeShell(command, io),
     }),
 
-    // ── Wallet tools ──────────────────────────────────────────────────────────
-
-    circle_list_wallets: tool({
-      description: TOOL_DESCRIPTIONS.circle_list_wallets,
-      parameters: z.object({}),
-      execute: async () => {
-        log('circle_list_wallets');
-        try {
-          const result = await circle.listWallets();
-          log(`circle_list_wallets ← ${result.length} wallet(s)`);
-          return result;
-        } catch (e) {
-          log(`circle_list_wallets ✗ ${(e as Error).message}`);
-          return toolError(e);
-        }
-      },
-    }),
-
-    circle_create_wallet: tool({
-      description: TOOL_DESCRIPTIONS.circle_create_wallet,
-      parameters: z.object({}),
-      execute: async () => {
-        log('circle_create_wallet');
-        try {
-          const result = await circle.createWallet();
-          log(`circle_create_wallet ← ${result.address}`);
-          return result;
-        } catch (e) {
-          log(`circle_create_wallet ✗ ${(e as Error).message}`);
-          return toolError(e);
-        }
-      },
-    }),
-
-    circle_get_balance: tool({
-      description: TOOL_DESCRIPTIONS.circle_get_balance,
+    [TOOL_NAMES.READ_FILE]: tool({
+      description: TOOL_DESCRIPTIONS[TOOL_NAMES.READ_FILE],
       parameters: z.object({
-        address: z.string().describe(PARAM_DESCRIPTIONS.address),
-        chain: chainEnum.optional().describe(PARAM_DESCRIPTIONS.chain),
+        filePath: z.string().describe(PARAM_DESCRIPTIONS.filePath),
+        offset: z.number().int().positive().optional().describe(PARAM_DESCRIPTIONS.offset),
+        limit: z.number().int().positive().optional().describe(PARAM_DESCRIPTIONS.limit),
       }),
-      execute: async ({ address, chain }) => {
-        log(`circle_get_balance address=${address} chain=${chain ?? circle.DEFAULT_CHAIN}`);
-        try {
-          const result = await circle.getBalance({ address, chain });
-          const usdc = result.tokens.find((t) => t.symbol?.toUpperCase() === 'USDC');
-          log(`circle_get_balance ← USDC=${usdc?.amount ?? '0'} (${result.tokens.length} token(s))`);
-          return result;
-        } catch (e) {
-          log(`circle_get_balance ✗ ${(e as Error).message}`);
-          return toolError(e);
-        }
-      },
+      execute: (args) => executeReadFile(args, io),
     }),
 
-    circle_deploy_wallet: tool({
-      description: TOOL_DESCRIPTIONS.circle_deploy_wallet,
+    [TOOL_NAMES.GREP]: tool({
+      description: TOOL_DESCRIPTIONS[TOOL_NAMES.GREP],
       parameters: z.object({
-        address: z.string().describe(PARAM_DESCRIPTIONS.address),
-        chain: chainEnum.optional().describe(PARAM_DESCRIPTIONS.chain),
+        pattern: z.string().describe(PARAM_DESCRIPTIONS.pattern),
+        searchPath: z.string().optional().describe(PARAM_DESCRIPTIONS.searchPath),
+        glob: z.string().optional().describe(PARAM_DESCRIPTIONS.glob),
       }),
-      execute: async ({ address, chain }) => {
-        log(`circle_deploy_wallet address=${address} chain=${chain ?? circle.DEFAULT_CHAIN}`);
-        try {
-          const result = await circle.deployWallet({ address, chain });
-          if (result.alreadyDeployed) {
-            log('circle_deploy_wallet ← already deployed');
-          } else if (result.deployed) {
-            log(`circle_deploy_wallet ← deployed tx=${result.txId ?? 'n/a'}`);
-          } else {
-            log(
-              `circle_deploy_wallet ← submitted, on-chain confirmation pending tx=${result.txId ?? 'n/a'}`,
-            );
-          }
-          return result;
-        } catch (e) {
-          log(`circle_deploy_wallet ✗ ${(e as Error).message}`);
-          return toolError(e);
-        }
-      },
-    }),
-
-    circle_wallet_fund: tool({
-      description: TOOL_DESCRIPTIONS.circle_wallet_fund,
-      parameters: z.object({
-        address: z.string().describe(PARAM_DESCRIPTIONS.address),
-        method: z
-          .enum(['crypto', 'fiat'])
-          .default('crypto')
-          .describe('"crypto" draws from the testnet faucet; "fiat" runs the test card flow.'),
-      }),
-      execute: async ({ address, method }) => {
-        log(`circle_wallet_fund address=${address} method=${method}`);
-        try {
-          const out = await circle.fundWallet({ address, method });
-          log('circle_wallet_fund ← done');
-          return out;
-        } catch (e) {
-          log(`circle_wallet_fund ✗ ${(e as Error).message}`);
-          return toolError(e);
-        }
-      },
-    }),
-
-    circle_fund_fiat: tool({
-      description: TOOL_DESCRIPTIONS.circle_fund_fiat,
-      parameters: z.object({
-        address: z.string().describe(PARAM_DESCRIPTIONS.address),
-        amount: z.number().positive().describe(PARAM_DESCRIPTIONS.fiatAmount),
-        chain: chainEnum.optional().describe(PARAM_DESCRIPTIONS.chain),
-        token: z
-          .enum(['usdc', 'eurc', 'eth', 'native'])
-          .optional()
-          .describe('Token to buy. Defaults to usdc.'),
-      }),
-      execute: async ({ address, amount, chain, token }) => {
-        log(
-          `circle_fund_fiat address=${address} amount=${amount} chain=${chain ?? circle.DEFAULT_CHAIN} token=${token ?? 'usdc'}`,
-        );
-        try {
-          // Local interactive demo: open the Transak page in the user's browser
-          // so they can complete the purchase. Best-effort, a no-op on headless.
-          const result = await circle.fundWalletFiat({ address, amount, chain, token, open: true });
-          log(`circle_fund_fiat ← ${preview(result.url, 80)}`);
-          return result;
-        } catch (e) {
-          log(`circle_fund_fiat ✗ ${(e as Error).message}`);
-          return toolError(e);
-        }
-      },
-    }),
-
-    // ── Service discovery tools ───────────────────────────────────────────────
-
-    circle_search_services: tool({
-      description: TOOL_DESCRIPTIONS.circle_search_services,
-      parameters: z.object({
-        keyword: z.string().describe('Search keyword.'),
-      }),
-      execute: async ({ keyword }) => {
-        log(`circle_search_services keyword="${keyword}"`);
-        try {
-          const result = await circle.searchServices({ keyword });
-          log(`circle_search_services ← ${result.length} hit(s)`);
-          // Makes these hits addressable by number at the next prompt, exactly
-          // as if the user had run `/discover` themselves.
-          recordServiceSearch(result);
-          return result;
-        } catch (e) {
-          log(`circle_search_services ✗ ${(e as Error).message}`);
-          return toolError(e);
-        }
-      },
-    }),
-
-    circle_inspect_service: tool({
-      description: TOOL_DESCRIPTIONS.circle_inspect_service,
-      parameters: z.object({
-        url: z.string().describe(PARAM_DESCRIPTIONS.serviceUrl),
-      }),
-      execute: async ({ url }) => {
-        log(`circle_inspect_service url=${url}`);
-        try {
-          const result = await circle.inspectService({ url });
-          log(`circle_inspect_service ← ${preview(JSON.stringify(result))}`);
-          return result;
-        } catch (e) {
-          log(`circle_inspect_service ✗ ${(e as Error).message}`);
-          return toolError(e);
-        }
-      },
-    }),
-
-    fetch_service: tool({
-      description: TOOL_DESCRIPTIONS.fetch_service,
-      parameters: z.object({
-        url: z.string().describe(PARAM_DESCRIPTIONS.serviceUrl),
-      }),
-      execute: async ({ url }) => {
-        log(`fetch_service url=${url}`);
-        try {
-          const result = await circle.fetchService({ url });
-          if (result.paymentRequired) {
-            log('fetch_service ← HTTP 402, payment required');
-          } else {
-            log(`fetch_service ← HTTP ${result.status} ${result.body.length} bytes`);
-          }
-          return result;
-        } catch (e) {
-          log(`fetch_service ✗ ${(e as Error).message}`);
-          return toolError(e);
-        }
-      },
-    }),
-
-    circle_get_gateway_balance: tool({
-      description: TOOL_DESCRIPTIONS.circle_get_gateway_balance,
-      parameters: z.object({
-        address: z.string().describe(PARAM_DESCRIPTIONS.address),
-        chain: chainEnum.optional().describe(PARAM_DESCRIPTIONS.chain),
-      }),
-      execute: async ({ address, chain }) => {
-        log(`circle_get_gateway_balance address=${address} chain=${chain ?? circle.DEFAULT_CHAIN}`);
-        try {
-          const result = await circle.gatewayBalance({ address, chain });
-          log(`circle_get_gateway_balance ← total=${result.total} USDC`);
-          return result;
-        } catch (e) {
-          log(`circle_get_gateway_balance ✗ ${(e as Error).message}`);
-          return toolError(e);
-        }
-      },
-    }),
-
-    // ── Spend tools — require human approval before executing ─────────────────
-    //
-    // In the Vercel AI SDK there is no external hook (no interruptOn, no
-    // canUseTool). Human-in-the-loop lives INSIDE the tool's execute function:
-    // the agent calls the tool normally, execution pauses on `await ask(...)`
-    // inside `approveSpend`, and only proceeds after the human approves.
-    //
-    // Errors are also returned rather than thrown — consistent with the rest of
-    // the kit — so the model can reason about failures and recover.
-
-    circle_pay_service: tool({
-      description: TOOL_DESCRIPTIONS.circle_pay_service,
-      parameters: z.object({
-        url: z.string().describe(PARAM_DESCRIPTIONS.serviceUrl),
-        address: z.string().describe(PARAM_DESCRIPTIONS.address),
-        method: methodEnum.optional().describe(PARAM_DESCRIPTIONS.httpMethod),
-        dataJson: z.string().describe(PARAM_DESCRIPTIONS.dataJson),
-      }),
-      execute: async ({ url, address, method, dataJson }) => {
-        const httpMethod = (method ?? 'GET').toUpperCase();
-        log(
-          `circle_pay_service url=${url} from=${address} method=${httpMethod} data=${preview(dataJson, 80)}`,
-        );
-
-        const payload = parsePayload(dataJson);
-        if (!payload.ok) {
-          log('circle_pay_service ✗ invalid dataJson');
-          return { error: payload.message };
-        }
-
-        const args = { url, address, method: httpMethod, data: payload.data };
-        if (!(await approveSpend(ask, 'circle_pay_service', args, log))) {
-          return { denied: true };
-        }
-
-        const chain = await selectPayChain(url, httpMethod, address, log);
-        if (!chain.ok) return { error: chain.message };
-
-        const deployed = await ensureDeployed(address, chain.chain, log);
-        if (!deployed.ok) return { error: deployed.message };
-
-        try {
-          const result = await circle.payService({
-            url,
-            address,
-            data: payload.data,
-            method: httpMethod,
-            chain: chain.chain,
-          });
-          const tx = result.txHash ? ` txHash=${result.txHash}` : '';
-          log(`circle_pay_service ← paid on ${circle.chainLabel(chain.chain)}${tx}`);
-          return result;
-        } catch (e) {
-          log(`circle_pay_service ✗ ${(e as Error).message}`);
-          return toolError(e);
-        }
-      },
-    }),
-
-    circle_gateway_deposit: tool({
-      description: TOOL_DESCRIPTIONS.circle_gateway_deposit,
-      parameters: z.object({
-        url: z.string().describe(PARAM_DESCRIPTIONS.serviceUrl),
-        address: z.string().describe(PARAM_DESCRIPTIONS.address),
-        method: methodEnum.optional().describe(PARAM_DESCRIPTIONS.httpMethod),
-        amount: z.number().positive().describe(PARAM_DESCRIPTIONS.depositAmount),
-      }),
-      execute: async ({ url, address, method, amount }) => {
-        const httpMethod = (method ?? 'GET').toUpperCase();
-        log(`circle_gateway_deposit url=${url} address=${address} amount=${amount}`);
-
-        const args = { url, address, method: httpMethod, amount };
-        if (!(await approveSpend(ask, 'circle_gateway_deposit', args, log))) {
-          return { denied: true };
-        }
-
-        const chain = await selectGatewayChain(url, httpMethod, log);
-        if (!chain.ok) return { error: chain.message };
-
-        const depositMethod = selectDepositMethod(chain.chain);
-        try {
-          const result = await circle.gatewayDeposit({
-            address,
-            amount,
-            chain: chain.chain,
-            method: depositMethod,
-          });
-          log(
-            `circle_gateway_deposit ← ${result.amount} USDC on ${circle.chainLabel(chain.chain)} via ${depositMethod} tx=${result.txId ?? 'n/a'}`,
-          );
-          return result;
-        } catch (e) {
-          log(`circle_gateway_deposit ✗ ${(e as Error).message}`);
-          return toolError(e);
-        }
-      },
+      execute: (args) => executeGrep(args, io),
     }),
   };
 }

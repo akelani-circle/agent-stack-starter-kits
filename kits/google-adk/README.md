@@ -63,7 +63,7 @@ A few common lookups skip the model round-trip and call the `circle` CLI directl
 | Variable | Required | Notes |
 | --- | --- | --- |
 | `GOOGLE_API_KEY` | yes | Google AI Studio key. Get one at https://aistudio.google.com/apikey. |
-| `LLM_MODEL` | no | Overrides the default model (`gemini-3-flash-preview`). Any Gemini model id supported by `@google/genai` works. |
+| `LLM_MODEL` | no | Overrides the default model (`gemini-3.1-pro-preview`). Any Gemini model id supported by `@google/genai` works. On a free-tier key, set a Flash model here — the Pro default burns the daily request quota fast. |
 | `NO_COLOR` | no | Disables colored output. Color is off automatically when output is piped. |
 
 There is no chain to configure. The `circle` CLI settles each payment on a chain the seller and your wallet have in common, and the agent reads Circle's skills for how to choose between them.

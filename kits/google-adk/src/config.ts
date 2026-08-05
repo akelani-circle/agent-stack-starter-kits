@@ -29,7 +29,7 @@ export interface KitConfig {
   model: string;
 }
 
-const DEFAULT_MODEL = 'gemini-3-flash-preview';
+const DEFAULT_MODEL = 'gemini-3.1-pro-preview';
 
 /**
  * Resolve the kit's runtime config.

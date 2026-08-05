@@ -63,8 +63,11 @@ const readFileTool = new FunctionTool({
   description: TOOL_DESCRIPTIONS[TOOL_NAMES.READ_FILE],
   parameters: z.object({
     filePath: z.string().describe(PARAM_DESCRIPTIONS.filePath),
-    offset: z.number().int().positive().optional().describe(PARAM_DESCRIPTIONS.offset),
-    limit: z.number().int().positive().optional().describe(PARAM_DESCRIPTIONS.limit),
+    // `.min(1)` rather than `.positive()`: both mean the same for an integer, but
+    // zod emits the latter as `exclusiveMinimum`, which Gemini's function-declaration
+    // schema rejects outright ("Unknown name \"exclusiveMinimum\"").
+    offset: z.number().int().min(1).optional().describe(PARAM_DESCRIPTIONS.offset),
+    limit: z.number().int().min(1).optional().describe(PARAM_DESCRIPTIONS.limit),
   }),
   execute: async (args) => executeReadFile(args, io),
 });

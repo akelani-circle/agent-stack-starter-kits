@@ -122,6 +122,13 @@ async function main(): Promise<void> {
     (result as any).result?.summary ??
     (result as any).steps?.agent?.output?.summary ??
     '(no output)';
+  // The exact prompt the workflow sent, not a fresh call to buildInitialPrompt():
+  // skills are read off disk on every call, and the workflow's own run may have
+  // just installed them, so recomputing here can silently swap the bootstrap
+  // prompt for the returning-session one — leaving `summary` as the reply to a
+  // question that was never actually asked in this history.
+  const initialPrompt: string =
+    (result as any).result?.prompt ?? (result as any).steps?.agent?.output?.prompt ?? (await buildInitialPrompt());
   out(replyBlock(summary));
   balance.refreshSoon();
 
@@ -129,7 +136,7 @@ async function main(): Promise<void> {
   // The workflow above already ran the opening turn; replaying it here as the
   // first user message is what carries that turn into the chat's history.
   const messages: Array<{ role: 'user'; content: string } | { role: 'assistant'; content: string }> = [
-    { role: 'user', content: await buildInitialPrompt() },
+    { role: 'user', content: initialPrompt },
     { role: 'assistant', content: summary },
   ];
 

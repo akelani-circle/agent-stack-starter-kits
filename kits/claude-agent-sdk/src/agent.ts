@@ -45,8 +45,12 @@ export const SHELL_TOOL = 'Bash';
  */
 const TOOLS = [SHELL_TOOL, 'Read', 'Grep', 'Glob'];
 
-/** Everything except the shell runs unprompted; `canUseTool` never sees these. */
-const AUTO_ALLOWED = ['Read', 'Grep', 'Glob'];
+/**
+ * Everything except the shell runs unprompted; `canUseTool` never sees these.
+ * Derived from `TOOLS` rather than listed again, so a tool added to one list
+ * cannot silently miss the other.
+ */
+const AUTO_ALLOWED = TOOLS.filter((tool) => tool !== SHELL_TOOL);
 
 /**
  * Build the Claude Agent SDK `query` options.

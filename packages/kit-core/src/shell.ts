@@ -174,10 +174,16 @@ export function runShell(command: string, options: ShellOptions = {}): Promise<S
     // what the agent would see if it were sitting at the terminal.
     let output = '';
     let timedOut = false;
+    // Keep a little past the cap so `omitted` is a real count for short
+    // overruns, without buffering a runaway command without limit. Trimmed to
+    // the remaining budget rather than checked-then-appended, so one large
+    // chunk (a pipe can deliver tens of KB at once) can't push `output` past
+    // this hard cap.
+    const hardCap = maxOutputChars * 4;
     const collect = (chunk: string): void => {
-      // Keep a little past the cap so `omitted` is a real count for short
-      // overruns, without buffering a runaway command without limit.
-      if (output.length < maxOutputChars * 4) output += chunk;
+      const remaining = hardCap - output.length;
+      if (remaining <= 0) return;
+      output += chunk.length > remaining ? chunk.slice(0, remaining) : chunk;
     };
     child.stdout.setEncoding('utf8');
     child.stderr.setEncoding('utf8');

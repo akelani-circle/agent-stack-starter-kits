@@ -36,6 +36,7 @@ import {
   createBalanceReadout,
   createCommandRouter,
   isProviderOverloaded,
+  isServiceSearchCommand,
   preview,
   recordServiceSearch,
   reportFatal,
@@ -122,7 +123,7 @@ function printAssistant(msg: Extract<SDKMessage, { type: 'assistant' }>): void {
       if (
         block.name === SHELL_TOOL &&
         typeof input.command === 'string' &&
-        /\bcircle\s+services\s+search\b/.test(input.command)
+        isServiceSearchCommand(input.command)
       ) {
         pendingSearches.add(block.id);
       }

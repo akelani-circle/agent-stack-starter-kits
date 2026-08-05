@@ -21,11 +21,14 @@ import 'dotenv/config';
 /** The LLM providers this kit can drive. */
 export type LLMProvider = 'anthropic' | 'openai';
 
-/** The shape every kit's config resolves to: who serves the model, the key that
- * authenticates it, and which model to ask for. */
+/**
+ * The shape this kit's config resolves to: who serves the model and which
+ * model to ask for. No API key field — unlike the kits that hand a key to
+ * their SDK explicitly, Mastra resolves `ANTHROPIC_API_KEY`/`OPENAI_API_KEY`
+ * from `process.env` itself once `provider` picks which one applies.
+ */
 export interface KitConfig {
   provider: LLMProvider;
-  providerApiKey: string;
   /** Full Mastra model string, e.g. "anthropic/claude-opus-5" or "openai/gpt-5.6-sol". */
   model: string;
 }
@@ -54,7 +57,6 @@ export function loadConfig(): KitConfig {
   if (anthropicKey) {
     return {
       provider: 'anthropic',
-      providerApiKey: anthropicKey,
       model: env.LLM_MODEL?.trim() || DEFAULT_ANTHROPIC_MODEL,
     };
   }
@@ -62,7 +64,6 @@ export function loadConfig(): KitConfig {
   if (openaiKey) {
     return {
       provider: 'openai',
-      providerApiKey: openaiKey,
       model: env.LLM_MODEL?.trim() || DEFAULT_OPENAI_MODEL,
     };
   }

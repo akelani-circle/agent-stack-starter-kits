@@ -31,6 +31,12 @@ import { CIRCLE_TOOLS } from './tools';
  * payment comes from those skill documents, which the agent reads with
  * `read_file` when one turns out to be relevant.
  *
+ * It is passed as a function rather than a resolved string: `buildInstructions`
+ * reads the skills index off disk on every call, because the agent's own first
+ * turn can install skills that had not been on the machine when this agent was
+ * built. The SDK re-invokes the function on every run, so the index the model
+ * sees stays current across a session instead of freezing at construction time.
+ *
  * Human-in-the-loop lives on the tools rather than here: `needsApproval` on the
  * shell tool asks whether *this command* spends, and a true answer interrupts
  * the run for `index.ts` to resolve.
@@ -45,7 +51,7 @@ export async function buildAgent(config: KitConfig): Promise<Agent> {
   return new Agent({
     name: 'Circle Payment Agent',
     model: config.model,
-    instructions: await buildInstructions(),
+    instructions: () => buildInstructions(),
     tools: CIRCLE_TOOLS,
   });
 }

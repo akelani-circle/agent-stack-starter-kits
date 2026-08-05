@@ -138,5 +138,9 @@ export async function searchServices(input: SearchServicesInput): Promise<Servic
     ['services', 'search', input.keyword, '--output', 'json'],
     { retries: READ_RETRIES },
   );
-  return extractSearchItems(raw).map(mapSearchItem);
+  // Same empty-`url` filter as `parseServiceSearch`: a malformed entry with no
+  // resource URL is not a service `/discover` can hand off to the agent.
+  return extractSearchItems(raw)
+    .map(mapSearchItem)
+    .filter((s) => s.url.length > 0);
 }

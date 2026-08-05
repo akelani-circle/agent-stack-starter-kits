@@ -161,6 +161,19 @@ export async function approveCommand(ask: AskFn, command: string, io: ToolIo): P
 }
 
 /**
+ * Whether `command` invokes `circle services search`.
+ *
+ * Exported (rather than kept private to `armQuickPickFromSearch` below) so a
+ * kit that cannot route through `executeShell` — one whose framework owns the
+ * shell tool itself and only sees commands and outputs as separate stream
+ * messages — can still recognize the same commands without a second, drifting
+ * copy of this pattern.
+ */
+export function isServiceSearchCommand(command: string): boolean {
+  return /\bcircle\s+services\s+search\b/.test(command);
+}
+
+/**
  * Keep a numbered service quick-pick pointing at the search that actually ran.
  *
  * `/discover` arms the list itself, but the agent runs its own searches in the
@@ -171,7 +184,7 @@ export async function approveCommand(ask: AskFn, command: string, io: ToolIo): P
  * nothing and leaves the previous list alone.
  */
 function armQuickPickFromSearch(command: string, output: string): void {
-  if (!/\bcircle\s+services\s+search\b/.test(command)) return;
+  if (!isServiceSearchCommand(command)) return;
   const services = parseServiceSearch(output);
   if (services.length > 0) recordServiceSearch(services);
 }
@@ -272,6 +285,14 @@ const MAX_FILES_SCANNED = 8_000;
 const MAX_MATCHES = 100;
 const MAX_FILE_BYTES = 2 * 1024 * 1024;
 const MAX_WALK_DEPTH = 12;
+/** Bounds one `re.test()` call, so a long line cannot turn a vulnerable pattern
+ * into a long hang — the risk scales with input length, so this is a cheap,
+ * partial mitigation rather than a full regex safety analysis. */
+const MAX_LINE_TEST_CHARS = 4_000;
+/** Rejects the common shapes of catastrophic backtracking — nested repetition
+ * like `(a+)+` or `(a*)*` — outright. Not a complete regex safety analyzer,
+ * but a model-supplied pattern that matches this is refused rather than run. */
+const CATASTROPHIC_BACKTRACKING = /\([^()]*[+*][^()]*\)[+*]/;
 
 /** Translate a glob into a regular expression over the path, `**` crossing separators. */
 function globToRegExp(glob: string): RegExp {
@@ -335,7 +356,8 @@ async function grepFile(path: string, re: RegExp, into: string[]): Promise<void>
   const lines = buffer.toString('utf8').split('\n');
   for (let i = 0; i < lines.length && into.length < MAX_MATCHES; i++) {
     const line = lines[i] ?? '';
-    if (re.test(line)) into.push(`${path}:${i + 1}: ${preview(line, 300)}`);
+    const testLine = line.length > MAX_LINE_TEST_CHARS ? line.slice(0, MAX_LINE_TEST_CHARS) : line;
+    if (re.test(testLine)) into.push(`${path}:${i + 1}: ${preview(line, 300)}`);
     // `re` is built without /g, so lastIndex never carries between lines.
   }
 }
@@ -356,6 +378,11 @@ export async function executeGrep(args: GrepArgs, io: ToolIo): Promise<string> {
     io.log(`${TOOL_NAMES.GREP} ✗ ${message}`);
     return message;
   }
+  if (CATASTROPHIC_BACKTRACKING.test(args.pattern)) {
+    const message = `Pattern rejected: nested repetition (e.g. "(a+)+") can hang the search on some input. Try a more specific pattern.`;
+    io.log(`${TOOL_NAMES.GREP} ✗ ${message}`);
+    return message;
+  }
 
   let info;
   try {
@@ -373,8 +400,15 @@ export async function executeGrep(args: GrepArgs, io: ToolIo): Promise<string> {
     scanned = 1;
   } else {
     const include = args.glob ? globToRegExp(args.glob) : null;
+    // `walked` bounds the cost of walking the tree itself; `scanned` (below,
+    // used only for the log line) counts the smaller set that also passed the
+    // glob. Capping on `scanned` instead would let a narrow glob over a huge
+    // tree walk everything — bounded only by MAX_WALK_DEPTH — before the file
+    // cap ever had a chance to apply.
+    let walked = 0;
     for await (const path of walk(root)) {
-      if (matches.length >= MAX_MATCHES || scanned >= MAX_FILES_SCANNED) break;
+      if (matches.length >= MAX_MATCHES || walked >= MAX_FILES_SCANNED) break;
+      walked++;
       // Match the glob against the path relative to the search root, so a
       // pattern is written against what the caller asked about.
       if (include && !include.test(relative(root, path).split(sep).join('/'))) continue;

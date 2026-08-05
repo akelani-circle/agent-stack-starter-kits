@@ -65,7 +65,10 @@ const SPEND_LABELS: ReadonlyArray<readonly [RegExp, string]> = [
   [/\bcircle services pay\b/, 'pay a marketplace seller (settles before the seller answers)'],
   [/\bcircle wallet transfer\b/, 'send USDC to an address'],
   [/\bcircle bridge transfer\b/, 'bridge USDC to another chain'],
-  [/\bcircle gateway deposit\b/, 'move USDC into the Gateway pool (amount plus a fee)'],
+  [
+    /\bcircle gateway deposit\b/,
+    "move USDC into the Gateway pool (amount plus a fee) — check --method: eco's destination is fixed to Polygon, so an eco deposit meant for another chain lands on the wrong one",
+  ],
   [/\bcircle gateway withdraw\b/, 'move USDC out of the Gateway pool'],
   [/\bcircle wallet swap\b/, 'swap tokens'],
   [/\bcircle wallet execute\b/, 'execute a contract call'],
@@ -82,13 +85,53 @@ const ESTIMATE = /(?:^| )--estimate(?: |$)/;
 const HELP = /(?:^| )(?:--help|-h)(?: |$)/;
 
 /**
+ * Remove quoting and backslash-escaping outside single quotes, the way the
+ * shell does when it assembles a word — so `c""ircle wallet transfer` and
+ * `c\i\rcle wallet transfer` both normalize to `circle wallet transfer` before
+ * they ever reach the gate. This does not evaluate `$(...)`, `` ` `` or `$VAR`;
+ * it only removes the quote marks themselves, which is enough to stop the
+ * common trick of splicing empty or single-character quotes into a command
+ * name to dodge a literal-string match.
+ */
+function normalizeShellEscaping(command: string): string {
+  let result = '';
+  let quote: '"' | "'" | null = null;
+  for (let i = 0; i < command.length; i++) {
+    const ch = command[i]!;
+    if (quote === "'") {
+      if (ch === "'") quote = null;
+      else result += ch;
+      continue;
+    }
+    if (ch === '\\' && i + 1 < command.length) {
+      // Outside single quotes, a backslash escapes the next character —
+      // dropping both the backslash and the character's special meaning.
+      result += command[i + 1];
+      i++;
+      continue;
+    }
+    if (quote === '"') {
+      if (ch === '"') quote = null;
+      else result += ch;
+      continue;
+    }
+    if (ch === '"' || ch === "'") {
+      quote = ch;
+      continue;
+    }
+    result += ch;
+  }
+  return result;
+}
+
+/**
  * Split a shell line into the commands it actually runs.
  *
  * A line is not one command, so each piece is judged on its own: any one of them
  * is enough to stop the whole line.
  */
 function segmentsOf(command: string): string[] {
-  return command
+  return normalizeShellEscaping(command)
     .split(/\|\||&&|[;|\n]/)
     .map((segment) => segment.trim().replace(/\s+/g, ' '))
     .filter(Boolean);

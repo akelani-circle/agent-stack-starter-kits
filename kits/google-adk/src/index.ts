@@ -26,11 +26,12 @@ import {
   buildInitialPrompt,
   createBalanceReadout,
   createCommandRouter,
+  isProviderOverloaded,
   reportFatal,
 } from '@agent-stack-starter-kits/kit-core';
 import { buildAgent, type ApprovalFn } from './agent';
 import { loadConfig } from './config';
-import { bold, heading, kitLine, red, replyBlock } from './theme';
+import { bold, heading, kitLine, red, replyBlock, yellow } from './theme';
 
 const APP_NAME = 'circle-payment-agent';
 const USER_ID = 'demo-user';
@@ -155,6 +156,13 @@ async function main(): Promise<void> {
       })) {
         if (event.partial) continue;
         if (event.errorCode) {
+          // A 529 that reaches here means the provider is overloaded and any
+          // retries the SDK does internally ran out — transient on the
+          // provider's side, not a kit bug, same as the Claude SDK kit's
+          // equivalent check on `msg.errors`.
+          if (isProviderOverloaded(event.errorMessage ?? event.errorCode)) {
+            log(yellow('The LLM provider is overloaded. This is transient; try again in a moment.'));
+          }
           log(red(`model error ${event.errorCode}: ${event.errorMessage ?? '(no message)'}`));
           continue;
         }

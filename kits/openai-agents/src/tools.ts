@@ -44,9 +44,6 @@ import {
 } from '@agent-stack-starter-kits/kit-core';
 import { toolLine } from './theme';
 
-/** The tool the approval gate applies to; `index.ts` reads the command off it. */
-export const SHELL_TOOL = TOOL_NAMES.SHELL;
-
 const io: ToolIo = {
   log: (line) => console.log(toolLine(line)),
   out: (line) => console.log(line),

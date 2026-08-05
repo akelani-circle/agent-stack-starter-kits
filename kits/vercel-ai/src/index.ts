@@ -73,10 +73,15 @@ const balance = createBalanceReadout(() => ui);
  */
 async function runAgentTurn(
   config: KitConfig,
-  system: string,
   messages: CoreMessage[],
   tools: CircleTools,
 ): Promise<{ text: string; responseMessages: CoreMessage[] }> {
+  // Rebuilt every turn rather than once for the whole session: it reads the
+  // skills index off disk, and the agent's own opening turn can install skills
+  // that were not present when the session began. `generateText` is stateless
+  // and takes the system prompt fresh on each call, so there is no reason to
+  // freeze this at session start.
+  const system = await buildInstructions();
   // Fast-fail quota-exhausted 429s so the fallback fires immediately; retry
   // every other transient error (and stalls) per the shared default.
   const shouldRetry = (error: unknown): boolean =>
@@ -129,11 +134,6 @@ async function main(): Promise<void> {
   await ensureSession({ ask, log, bold });
   await balance.refresh();
 
-  // The system prompt: identity, three rules for a terminal, and whatever Circle
-  // skills are installed. Built once, here, because `generateText` is stateless
-  // and takes it on every call.
-  const system = await buildInstructions();
-
   // Conversation history — the running CoreMessage[] that grows each turn. The
   // Vercel AI SDK's `generateText` is stateless: we own the history and pass it
   // back on every call. `result.response.messages` gives us all the assistant +
@@ -158,7 +158,7 @@ async function main(): Promise<void> {
   // the session; a blank line is ignored and re-prompts.
   log('invoking agent ...');
   chat.setStatus('working…');
-  const first = await runAgentTurn(config, system, messages, tools);
+  const first = await runAgentTurn(config, messages, tools);
   chat.setStatus(null);
   out(replyBlock(first.text));
   balance.refreshSoon();
@@ -182,7 +182,7 @@ async function main(): Promise<void> {
     messages.push({ role: 'user', content: outcome.forward ?? next });
 
     chat.setStatus('working…');
-    const turn = await runAgentTurn(config, system, messages, tools);
+    const turn = await runAgentTurn(config, messages, tools);
     chat.setStatus(null);
     out(replyBlock(turn.text));
     balance.refreshSoon();

@@ -43,7 +43,13 @@ import { isAbsolute, join, relative, resolve, sep } from 'node:path';
 
 import { parseServiceSearch, type AskFn } from '@agent-stack-starter-kits/circle-tools';
 
-import { describeApproval, requiresApproval } from './approval';
+import {
+  describeApproval,
+  isHelpInvocation,
+  requiresApproval,
+  segmentsOf,
+  setKitLoggedIn,
+} from './approval';
 import { recordServiceSearch } from './commands';
 import { formatShellResult, runShell } from './shell';
 import { bold, dim, green, red, runningLine, toolBlock, yellow, type ToolBlock } from './theme';
@@ -222,6 +228,30 @@ function armQuickPickFromSearch(command: string, output: string): void {
 }
 
 /**
+ * Keep the approval prompt's account of the session in step with the shell.
+ *
+ * Sniffing output is how this survives the agent owning the session: the kit
+ * logs the user in before the first turn, and from then on the only thing that
+ * can log them out or back in is a command the agent typed. A login is only
+ * counted when the CLI says it completed — the two-step flow's `--init` half
+ * exits 0 having done nothing but send an email.
+ *
+ * Judged per segment, the way the approval gate is, and with `--help` excluded
+ * for the same reason it is excluded there: `circle wallet logout --help` exits
+ * 0 and prints the word logout without logging anyone out.
+ */
+function trackSession(command: string, output: string, exitCode: number | null): void {
+  if (exitCode !== 0) return;
+  for (const segment of segmentsOf(command)) {
+    if (isHelpInvocation(segment)) continue;
+    if (segment.startsWith('circle wallet logout')) setKitLoggedIn(false);
+    else if (segment.startsWith('circle wallet login') && /\blogged in as\b/i.test(output)) {
+      setKitLoggedIn(true);
+    }
+  }
+}
+
+/**
  * Run a shell command, gating it on the user first when this kit's framework
  * cannot gate it earlier.
  */
@@ -254,6 +284,7 @@ export async function executeShell(command: string, io: ToolIo): Promise<string>
   stopNotice();
 
   armQuickPickFromSearch(command, result.output);
+  trackSession(command, result.output, result.exitCode);
 
   emitBlock(io, {
     name: TOOL_NAMES.SHELL,

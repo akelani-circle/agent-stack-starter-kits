@@ -60,8 +60,34 @@ const NEEDS_APPROVAL: readonly RegExp[] = [
   /\bcircle wallet login\b/,
 ];
 
-/** Human labels for the gated commands, for the approval prompt. */
-const SPEND_LABELS: ReadonlyArray<readonly [RegExp, string]> = [
+/**
+ * Whether a Circle session is believed to be live right now.
+ *
+ * Starts true because every kit runs its own login gate before the agent takes
+ * its first turn, so by the time any approval prompt can appear there is a
+ * session. It exists because the login label used to assert "this kit already
+ * logged you in" unconditionally — including on the turn straight after the
+ * agent ran `circle wallet logout`, where it is false and talks the user out of
+ * approving the one command that would fix it.
+ */
+let kitLoggedIn = true;
+
+/** Record whether a session is live. Called by the shell when it sees a login or logout land. */
+export function setKitLoggedIn(value: boolean): void {
+  kitLoggedIn = value;
+}
+
+const LOGIN_LABEL = (): string =>
+  kitLoggedIn
+    ? 'log in — this kit already logged you in, and the CLI prompt cannot be answered from here'
+    : 'log in — you are logged out; the CLI prompt cannot be answered from here, so this has to ' +
+      'use --init and an OTP you read back from your email';
+
+/**
+ * Human labels for the gated commands, for the approval prompt. A label may be
+ * a function when what it should say depends on the state of the session.
+ */
+const SPEND_LABELS: ReadonlyArray<readonly [RegExp, string | (() => string)]> = [
   [/\bcircle services pay\b/, 'pay a marketplace seller (settles before the seller answers)'],
   [/\bcircle wallet transfer\b/, 'send USDC to an address'],
   [/\bcircle bridge transfer\b/, 'bridge USDC to another chain'],
@@ -75,7 +101,7 @@ const SPEND_LABELS: ReadonlyArray<readonly [RegExp, string]> = [
   [/\bcircle wallet sign\b/, 'sign a message, which can authorise a later transfer'],
   [/\bcircle wallet limit (set|reset)\b/, "change the wallet's spending caps"],
   [/\bcircle terms (accept|reset)\b/, 'change Terms of Use acceptance — this is yours to do, not the agent\'s'],
-  [/\bcircle wallet login\b/, 'log in — this kit already logged you in, and the CLI prompt cannot be answered from here'],
+  [/\bcircle wallet login\b/, LOGIN_LABEL],
 ];
 
 // `circle services pay --estimate` returns a price without signing, and `--help`
@@ -130,11 +156,16 @@ function normalizeShellEscaping(command: string): string {
  * A line is not one command, so each piece is judged on its own: any one of them
  * is enough to stop the whole line.
  */
-function segmentsOf(command: string): string[] {
+export function segmentsOf(command: string): string[] {
   return normalizeShellEscaping(command)
     .split(/\|\||&&|[;|\n]/)
     .map((segment) => segment.trim().replace(/\s+/g, ' '))
     .filter(Boolean);
+}
+
+/** Whether a segment only asks a command to describe itself. */
+export function isHelpInvocation(segment: string): boolean {
+  return HELP.test(segment);
 }
 
 /**
@@ -175,7 +206,7 @@ export function describeApproval(command: string): string | null {
   for (const segment of segmentsOf(command)) {
     if (isReadOnlyInvocation(segment)) continue;
     for (const [pattern, label] of SPEND_LABELS) {
-      if (pattern.test(segment)) reasons.add(label);
+      if (pattern.test(segment)) reasons.add(typeof label === 'function' ? label() : label);
     }
   }
   return reasons.size > 0 ? [...reasons].join('; ') : null;

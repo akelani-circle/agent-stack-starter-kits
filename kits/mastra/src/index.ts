@@ -17,6 +17,7 @@
  */
 
 import 'dotenv/config';
+import type { AIV5ResponseMessage } from '@mastra/core/agent/message-list';
 import { createChatUi, withRetry, type ChatUi } from '@agent-stack-starter-kits/agent-cli';
 import { ensureSession, type AskFn } from '@agent-stack-starter-kits/circle-tools';
 
@@ -53,6 +54,12 @@ function out(line: string): void {
 // The pinned USDC readout, shared by every kit (see kit-core/balance). `ui` is
 // passed as a getter because it only exists once main() creates the chat UI.
 const balance = createBalanceReadout(() => ui);
+
+/**
+ * One entry of the conversation this kit owns and re-sends every turn: a typed
+ * user line, or one of the assistant / tool messages a turn produced.
+ */
+type ChatMessage = { role: 'user'; content: string } | AIV5ResponseMessage;
 
 async function main(): Promise<void> {
   // Pin the input to the bottom (Claude Code-style) while logs scroll above.
@@ -134,8 +141,11 @@ async function main(): Promise<void> {
 
   const agent = await buildAgent(config, ask);
   // The workflow above already ran the opening turn; replaying it here as the
-  // first user message is what carries that turn into the chat's history.
-  const messages: Array<{ role: 'user'; content: string } | { role: 'assistant'; content: string }> = [
+  // first user message is what carries that turn into the chat's history. Only
+  // its text is available (the step returns a summary), which is the one place
+  // history is lossy — the opening turn is read-only setup, so nothing later in
+  // the conversation depends on the detail of what it ran.
+  const messages: ChatMessage[] = [
     { role: 'user', content: initialPrompt },
     { role: 'assistant', content: summary },
   ];
@@ -173,7 +183,20 @@ async function main(): Promise<void> {
     const text = response.text ?? '';
     out(replyBlock(text));
     balance.refreshSoon();
-    messages.push({ role: 'assistant', content: text });
+    // Everything the turn produced, not just its closing text: `generate` is
+    // stateless (no memory is configured), so this array is the whole context
+    // the next turn gets. Appending only `text` would drop every tool call and
+    // tool result, and a turn that ends mid-procedure — "I sent the code, tell
+    // me what it says" — would come back next turn with no record of what it
+    // ran, and start the procedure again from the top.
+    const turnMessages = response.response?.messages;
+    messages.push(
+      ...(turnMessages && turnMessages.length > 0
+        ? turnMessages
+        : // A degraded turn can answer with no response messages at all. Keep
+          // the text so the reply the user just read is still in the history.
+          [{ role: 'assistant' as const, content: text }]),
+    );
   }
 
   // Unmount the UI (and restore the patched console) so the process can exit.

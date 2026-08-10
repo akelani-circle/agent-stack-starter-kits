@@ -46,7 +46,7 @@ import { parseServiceSearch, type AskFn } from '@agent-stack-starter-kits/circle
 import { describeApproval, requiresApproval } from './approval';
 import { recordServiceSearch } from './commands';
 import { formatShellResult, runShell } from './shell';
-import { bold, dim, green, red, yellow } from './theme';
+import { bold, dim, green, red, runningLine, toolBlock, yellow, type ToolBlock } from './theme';
 
 /** Tool names, single-sourced so a kit's logs and its schema cannot disagree. */
 export const TOOL_NAMES = {
@@ -135,6 +135,38 @@ export function preview(value: string, max = 120): string {
   return oneLine.length > max ? `${oneLine.slice(0, max)}…` : oneLine;
 }
 
+/**
+ * How long a tool call may run before it announces itself.
+ *
+ * Short enough that a human never wonders whether anything is happening, long
+ * enough that the great majority of calls — a file read, a `--help`, a status
+ * check — finish first and print nothing but their finished block.
+ */
+export const RUNNING_NOTICE_MS = 1_000;
+
+/**
+ * Say that a call is still running, if it still is a second from now.
+ *
+ * Returns the canceller; call it as soon as the tool has a result, whether that
+ * result is a success, a failure or a thrown error. Exported because the Claude
+ * Agent SDK kit's tools are the SDK's own and so cannot go through the bodies
+ * below, but should still feel the same to watch.
+ */
+export function announceRunning(
+  emit: (line: string) => void,
+  name: string,
+  detail: string,
+): () => void {
+  const timer = setTimeout(() => emit(runningLine(name, detail)), RUNNING_NOTICE_MS);
+  return () => clearTimeout(timer);
+}
+
+/** Print a finished tool call as one unsplittable block. */
+function emitBlock(io: ToolIo, block: ToolBlock): void {
+  const out = io.out ?? ((line: string) => console.log(line));
+  out(toolBlock(block));
+}
+
 /** Expand a leading `~` and make a path absolute against the home directory. */
 function resolvePath(path: string): string {
   const expanded = path.startsWith('~') ? join(homedir(), path.slice(1)) : path;
@@ -194,11 +226,14 @@ function armQuickPickFromSearch(command: string, output: string): void {
  * cannot gate it earlier.
  */
 export async function executeShell(command: string, io: ToolIo): Promise<string> {
-  io.log(`${TOOL_NAMES.SHELL} ${preview(command)}`);
-
+  // Nothing is printed up front: the block below carries the command, and a
+  // gated command is printed by the approval prompt anyway.
   if (io.ask && requiresApproval(command)) {
     if (!(await approveCommand(io.ask, command, io))) return REJECTED_MESSAGE;
   }
+
+  const detail = preview(command);
+  const stopNotice = announceRunning(io.log, TOOL_NAMES.SHELL, detail);
 
   let result;
   try {
@@ -206,16 +241,28 @@ export async function executeShell(command: string, io: ToolIo): Promise<string>
   } catch (e) {
     // The shell itself could not be started. Distinct from a command that ran
     // and failed, and worth saying so: retrying will not fix it.
+    stopNotice();
     const message = (e as Error).message;
-    io.log(`${TOOL_NAMES.SHELL} ✗ ${message}`);
+    emitBlock(io, {
+      name: TOOL_NAMES.SHELL,
+      detail,
+      status: `shell could not be started: ${message}`,
+      ok: false,
+    });
     return `The shell could not be started: ${message}`;
   }
+  stopNotice();
 
   armQuickPickFromSearch(command, result.output);
 
-  const seconds = (result.durationMs / 1000).toFixed(1);
-  const status = result.timedOut ? 'timed out' : `exit ${String(result.exitCode)}`;
-  io.log(`${TOOL_NAMES.SHELL} ← ${status} (${seconds}s, ${result.output.length} chars)`);
+  emitBlock(io, {
+    name: TOOL_NAMES.SHELL,
+    detail,
+    body: result.output,
+    status: result.timedOut ? 'timed out' : `exit ${String(result.exitCode)}`,
+    ok: !result.timedOut && result.exitCode === 0,
+    meta: [`${(result.durationMs / 1000).toFixed(1)}s`, `${result.output.length} chars`],
+  });
   return formatShellResult(result);
 }
 
@@ -238,25 +285,30 @@ export interface ReadFileArgs {
 export async function executeReadFile(args: ReadFileArgs, io: ToolIo): Promise<string> {
   const path = resolvePath(args.filePath);
   const slice = args.offset || args.limit ? ` offset=${args.offset ?? 1} limit=${args.limit ?? '∞'}` : '';
-  io.log(`${TOOL_NAMES.READ_FILE} ${preview(path)}${slice}`);
+  const detail = `${preview(path)}${slice}`;
+  const stopNotice = announceRunning(io.log, TOOL_NAMES.READ_FILE, detail);
 
   let contents: string;
   try {
     contents = await readFile(path, 'utf8');
   } catch (e) {
+    stopNotice();
     const message = (e as NodeJS.ErrnoException).code === 'ENOENT'
       ? `No such file: ${path}`
       : `Could not read ${path}: ${(e as Error).message}`;
-    io.log(`${TOOL_NAMES.READ_FILE} ✗ ${message}`);
+    emitBlock(io, { name: TOOL_NAMES.READ_FILE, detail, status: message, ok: false });
     return message;
   }
+  stopNotice();
 
   const lines = contents.split('\n');
   const from = Math.max(1, args.offset ?? 1);
   const to = args.limit ? from + args.limit - 1 : lines.length;
   const selected = lines.slice(from - 1, to);
   if (selected.length === 0) {
-    return `${path} has ${lines.length} lines; nothing to read from line ${from}.`;
+    const message = `${path} has ${lines.length} lines; nothing to read from line ${from}.`;
+    emitBlock(io, { name: TOOL_NAMES.READ_FILE, detail, status: message, ok: false });
+    return message;
   }
 
   const width = String(from + selected.length - 1).length;
@@ -274,7 +326,14 @@ export async function executeReadFile(args: ReadFileArgs, io: ToolIo): Promise<s
     note = `\n\n[lines ${from}-${to} of ${lines.length}. Continue with offset ${to + 1}.]`;
   }
 
-  io.log(`${TOOL_NAMES.READ_FILE} ← ${selected.length} lines`);
+  // No body: a file read is the one tool whose output is already in a file the
+  // user can open, and twelve lines of a skill document tell them nothing.
+  emitBlock(io, {
+    name: TOOL_NAMES.READ_FILE,
+    detail,
+    status: `${selected.length} lines`,
+    meta: [`${body.length} chars`],
+  });
   return body + note;
 }
 
@@ -365,34 +424,36 @@ async function grepFile(path: string, re: RegExp, into: string[]): Promise<void>
 /** Search file contents for a pattern, over a file or a directory tree. */
 export async function executeGrep(args: GrepArgs, io: ToolIo): Promise<string> {
   const root = resolvePath(args.searchPath ?? homedir());
-  io.log(
-    `${TOOL_NAMES.GREP} ${preview(args.pattern, 60)} in ${preview(root)}` +
-      (args.glob ? ` glob=${args.glob}` : ''),
-  );
+  const detail =
+    `${preview(args.pattern, 60)} in ${preview(root)}` + (args.glob ? ` glob=${args.glob}` : '');
+  const fail = (message: string): string => {
+    emitBlock(io, { name: TOOL_NAMES.GREP, detail, status: message, ok: false });
+    return message;
+  };
 
   let re: RegExp;
   try {
     re = new RegExp(args.pattern, 'i');
   } catch (e) {
-    const message = `Not a valid regular expression: ${(e as Error).message}`;
-    io.log(`${TOOL_NAMES.GREP} ✗ ${message}`);
-    return message;
+    return fail(`Not a valid regular expression: ${(e as Error).message}`);
   }
   if (CATASTROPHIC_BACKTRACKING.test(args.pattern)) {
-    const message = `Pattern rejected: nested repetition (e.g. "(a+)+") can hang the search on some input. Try a more specific pattern.`;
-    io.log(`${TOOL_NAMES.GREP} ✗ ${message}`);
-    return message;
+    return fail(
+      'Pattern rejected: nested repetition (e.g. "(a+)+") can hang the search on some input. Try a more specific pattern.',
+    );
   }
 
   let info;
   try {
     info = await stat(root);
   } catch {
-    const message = `No such file or directory: ${root}`;
-    io.log(`${TOOL_NAMES.GREP} ✗ ${message}`);
-    return message;
+    return fail(`No such file or directory: ${root}`);
   }
 
+  // Only now, past the checks that fail instantly: a walk of a home directory is
+  // the one call here that regularly outlasts the notice.
+  const stopNotice = announceRunning(io.log, TOOL_NAMES.GREP, detail);
+  const startedAt = Date.now();
   const matches: string[] = [];
   let scanned = 0;
   if (info.isFile()) {
@@ -417,7 +478,15 @@ export async function executeGrep(args: GrepArgs, io: ToolIo): Promise<string> {
     }
   }
 
-  io.log(`${TOOL_NAMES.GREP} ← ${matches.length} matches in ${scanned} files`);
+  stopNotice();
+  emitBlock(io, {
+    name: TOOL_NAMES.GREP,
+    detail,
+    body: matches.join('\n'),
+    status: `${matches.length} match${matches.length === 1 ? '' : 'es'} in ${scanned} files`,
+    meta: [`${((Date.now() - startedAt) / 1000).toFixed(1)}s`],
+  });
+
   if (matches.length === 0) {
     return `No matches for /${args.pattern}/ under ${root}${args.glob ? ` (glob ${args.glob})` : ''}.`;
   }

@@ -31,6 +31,7 @@ import {
 } from '@agent-stack-starter-kits/circle-tools';
 
 import {
+  announceRunning,
   approveCommand,
   buildInitialPrompt,
   createBalanceReadout,
@@ -45,7 +46,17 @@ import {
 } from '@agent-stack-starter-kits/kit-core';
 import { buildQueryOptions, SHELL_TOOL } from './agent';
 import { loadConfig } from './config';
-import { bold, dim, heading, kitLine, red, streamedBlock, yellow } from './theme';
+import {
+  bold,
+  dim,
+  heading,
+  kitLine,
+  red,
+  streamedBlock,
+  toolBlock,
+  toolLine,
+  yellow,
+} from './theme';
 
 // The chat UI pins the input to the bottom while logs scroll above it. It is
 // created in main(); the module-level handle lets the fatal handler close it
@@ -75,26 +86,40 @@ function userMessage(text: string): SDKUserMessage {
   return { type: 'user', message: { role: 'user', content: text }, parent_tool_use_id: null };
 }
 
+/** A tool call the agent has started and whose result has not come back yet. */
+interface PendingTool {
+  name: string;
+  detail: string;
+  startedAt: number;
+  /** True for `circle services search`, which arms the numbered quick-pick. */
+  isSearch: boolean;
+  /** Cancels the "(running…)" notice; call it the moment a result arrives. */
+  stopNotice: () => void;
+}
+
 /**
- * Marketplace searches the agent has run and whose output has not come back yet,
- * keyed by tool-use id.
+ * Tool calls in flight, keyed by tool-use id.
  *
- * The other kits arm the numbered quick-pick from inside their own shell tool,
- * where the command and its output are one function call apart. Here the shell
- * is the SDK's, so the two arrive as separate messages — the command on an
- * assistant message, the output on the user message that answers it — and the id
- * is what ties them back together.
+ * The other kits pair a command with its output inside their own tool body,
+ * where the two are one function call apart. Here the tools are the SDK's, so
+ * they arrive as separate messages — the call on an assistant message, the
+ * output on the user message that answers it — and the id is what ties them
+ * back together. Everything that needs both ends hangs off this map: the
+ * finished block printed below, and the quick-pick armed from a search payload.
  */
-const pendingSearches = new Set<string>();
+const pendingTools = new Map<string, PendingTool>();
+
+/** The SDK tools whose output is worth showing; `Read` opens a file the user already has. */
+const BODY_TOOLS = new Set([SHELL_TOOL, 'Grep', 'Glob']);
 
 /**
  * Print one assistant message: the model's prose under a per-turn heading, and a
- * line for each tool it reached for.
+ * record of each tool it reached for.
  *
- * The tool lines matter more here than they look. This kit's tools are the SDK's
- * own, so nothing logs itself the way a hand-written tool body would, and
- * without this the terminal would show a long silence and then a conclusion,
- * with no sign of the commands that produced it.
+ * Nothing prints for a tool call here — it is registered, and `printToolResults`
+ * prints the whole call as one block once its output lands, the way `kit-core`'s
+ * own tool bodies do in the other five kits. A call slow enough to be worth
+ * announcing says so on its own after a second; see `announceRunning`.
  *
  * NOTE: prose prints in the `--- agent ---` frame rather than the
  * `--- agent reply ---` one the other five kits close a turn with. Those kits
@@ -111,44 +136,73 @@ function printAssistant(msg: Extract<SDKMessage, { type: 'assistant' }>): void {
       out(streamedBlock(block.text));
     } else if (block.type === 'tool_use') {
       const input = (block.input ?? {}) as Record<string, unknown>;
-      const detail =
-        typeof input.command === 'string'
-          ? input.command
-          : typeof input.file_path === 'string'
-            ? input.file_path
-            : typeof input.pattern === 'string'
-              ? input.pattern
-              : '';
-      log(`${block.name}${detail ? ` ${preview(detail)}` : ''}`);
-      if (
-        block.name === SHELL_TOOL &&
-        typeof input.command === 'string' &&
-        isServiceSearchCommand(input.command)
-      ) {
-        pendingSearches.add(block.id);
-      }
+      const command = typeof input.command === 'string' ? input.command : '';
+      const raw =
+        command ||
+        (typeof input.file_path === 'string'
+          ? input.file_path
+          : typeof input.pattern === 'string'
+            ? input.pattern
+            : '');
+      const detail = preview(raw);
+      pendingTools.set(block.id, {
+        name: block.name,
+        detail,
+        startedAt: Date.now(),
+        isSearch: block.name === SHELL_TOOL && isServiceSearchCommand(command),
+        stopNotice: announceRunning((line) => out(toolLine(line)), block.name, detail),
+      });
     }
   }
 }
 
+/** Flatten a tool result's content, which the SDK sends as a string or as parts. */
+function resultText(content: unknown): string {
+  if (typeof content === 'string') return content;
+  if (!Array.isArray(content)) return '';
+  return content
+    .map((part: { type?: string; text?: string }) => (part.type === 'text' ? (part.text ?? '') : ''))
+    .join('\n');
+}
+
 /**
- * Re-arm the numbered quick-pick from a marketplace search the agent ran itself,
- * so a bare "2" at the next prompt means the second result it just printed.
- * Silent by contract: output that is not a search payload leaves the list alone.
+ * Print each finished tool call as one block, and re-arm the numbered quick-pick
+ * when the call was a marketplace search — so a bare "2" at the next prompt
+ * means the second result the agent just printed. The quick-pick half is silent
+ * by contract: output that is not a search payload leaves the list alone.
  */
-function noteToolResults(msg: Extract<SDKMessage, { type: 'user' }>): void {
+function printToolResults(msg: Extract<SDKMessage, { type: 'user' }>): void {
   const content = msg.message.content;
   if (!Array.isArray(content)) return;
   for (const block of content) {
-    if (block.type !== 'tool_result' || !pendingSearches.delete(block.tool_use_id)) continue;
-    const text =
-      typeof block.content === 'string'
-        ? block.content
-        : (block.content ?? [])
-            .map((part) => (part.type === 'text' ? part.text : ''))
-            .join('\n');
-    const services = parseServiceSearch(text);
-    if (services.length > 0) recordServiceSearch(services);
+    if (block.type !== 'tool_result') continue;
+    const pending = pendingTools.get(block.tool_use_id);
+    pendingTools.delete(block.tool_use_id);
+    pending?.stopNotice();
+
+    const text = resultText(block.content);
+    if (pending?.isSearch) {
+      const services = parseServiceSearch(text);
+      if (services.length > 0) recordServiceSearch(services);
+    }
+    if (!pending) continue;
+
+    const failed = block.is_error === true;
+    const showBody = BODY_TOOLS.has(pending.name);
+    const lines = text ? text.split('\n').length : 0;
+    out(
+      toolBlock({
+        name: pending.name,
+        detail: pending.detail,
+        body: showBody || failed ? text : undefined,
+        status: failed ? 'error' : showBody ? 'ok' : `${lines} lines`,
+        ok: !failed,
+        meta: [
+          `${((Date.now() - pending.startedAt) / 1000).toFixed(1)}s`,
+          `${text.length} chars`,
+        ],
+      }),
+    );
   }
 }
 
@@ -275,7 +329,7 @@ async function main(): Promise<void> {
     if (msg.type === 'assistant') {
       printAssistant(msg);
     } else if (msg.type === 'user') {
-      noteToolResults(msg);
+      printToolResults(msg);
     } else if (msg.type === 'result') {
       printResult(msg);
       chat.setStatus(null);

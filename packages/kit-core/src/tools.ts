@@ -151,10 +151,37 @@ export function preview(value: string, max = 120): string {
 export const RUNNING_NOTICE_MS = 1_000;
 
 /**
+ * Show an in-flight tool call somewhere that can be un-shown, returning the
+ * function that takes it away again. See `setLiveNotices`.
+ */
+export type LiveNotice = (label: string) => () => void;
+
+let liveNotice: LiveNotice | null = null;
+
+/**
+ * Hand `announceRunning` a live region to put in-flight notices in.
+ *
+ * Process-wide state, like the session flag in `./approval`, and for the same
+ * reason: there is one terminal, and the code that announces a call is several
+ * frameworks away from the code that owns the screen. A kit installs its chat
+ * UI's here once at startup — wrapping it in the kit's own `toolLine` so the
+ * notice is colored exactly like the block that will replace it — and every tool
+ * in every kit is then announced the same way.
+ *
+ * Left unset (a kit with no UI, or anything running before one exists) the
+ * notice falls back to an ordinary printed line, which is what it always was.
+ */
+export function setLiveNotices(start: LiveNotice | null): void {
+  liveNotice = start;
+}
+
+/**
  * Say that a call is still running, if it still is a second from now.
  *
  * Returns the canceller; call it as soon as the tool has a result, whether that
- * result is a success, a failure or a thrown error. Exported because the Claude
+ * result is a success, a failure or a thrown error. Cancelling both stops a
+ * notice that has not appeared yet and removes one that has, so the notice is
+ * gone by the time the finished block is printed. Exported because the Claude
  * Agent SDK kit's tools are the SDK's own and so cannot go through the bodies
  * below, but should still feel the same to watch.
  */
@@ -163,8 +190,16 @@ export function announceRunning(
   name: string,
   detail: string,
 ): () => void {
-  const timer = setTimeout(() => emit(runningLine(name, detail)), RUNNING_NOTICE_MS);
-  return () => clearTimeout(timer);
+  let clear: (() => void) | null = null;
+  const timer = setTimeout(() => {
+    if (liveNotice) clear = liveNotice(`${name} ${detail}`);
+    else emit(runningLine(name, detail));
+  }, RUNNING_NOTICE_MS);
+  return () => {
+    clearTimeout(timer);
+    clear?.();
+    clear = null;
+  };
 }
 
 /** Print a finished tool call as one unsplittable block. */

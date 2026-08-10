@@ -42,6 +42,7 @@ import {
   recordServiceSearch,
   reportFatal,
   requiresApproval,
+  setLiveNotices,
   REJECTED_MESSAGE,
 } from '@agent-stack-starter-kits/kit-core';
 import { buildQueryOptions, SHELL_TOOL } from './agent';
@@ -228,6 +229,10 @@ async function main(): Promise<void> {
   // Falls back to plain console + readline when stdout/stdin is not a TTY.
   const chat = createChatUi({ title: heading('Autonomous Payment Agent') });
   ui = chat;
+  // In-flight tool calls draw in the live region at the bottom of the frame
+  // rather than in the scrollback, so each one erases itself the moment its
+  // finished block prints (see kit-core's `setLiveNotices`).
+  setLiveNotices((label) => chat.startRunning(toolLine(label)));
 
   log('Autonomous Payment Agent demo starting');
   const config = loadConfig();

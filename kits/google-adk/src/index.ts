@@ -28,10 +28,11 @@ import {
   createCommandRouter,
   isProviderOverloaded,
   reportFatal,
+  setLiveNotices,
 } from '@agent-stack-starter-kits/kit-core';
 import { buildAgent, type ApprovalFn } from './agent';
 import { loadConfig } from './config';
-import { bold, heading, kitLine, red, replyBlock, yellow } from './theme';
+import { bold, heading, kitLine, red, replyBlock, toolLine, yellow } from './theme';
 
 const APP_NAME = 'circle-payment-agent';
 const USER_ID = 'demo-user';
@@ -86,6 +87,10 @@ async function main(): Promise<void> {
   // Falls back to plain console + readline when stdout/stdin is not a TTY.
   const chat = createChatUi({ title: heading('Autonomous Payment Agent') });
   ui = chat;
+  // In-flight tool calls draw in the live region at the bottom of the frame
+  // rather than in the scrollback, so each one erases itself the moment its
+  // finished block prints (see kit-core's `setLiveNotices`).
+  setLiveNotices((label) => chat.startRunning(toolLine(label)));
 
   log('Autonomous Payment Agent demo starting');
   const config = loadConfig();

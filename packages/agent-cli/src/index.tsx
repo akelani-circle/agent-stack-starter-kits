@@ -72,6 +72,20 @@ export interface AskOptions {
 export interface ChatUi {
   /** Append one line to the scrollback log (keeps any embedded ANSI color). */
   log(line: string): void;
+  /**
+   * Show `text` in the live region as an in-flight line, with an animated
+   * `(running…)` suffix; call the returned function when the work finishes and
+   * the line disappears.
+   *
+   * Unlike `log`, nothing is committed to terminal history: an in-flight notice
+   * is a statement about *now*, and once the call has finished its block says
+   * everything the notice did. Repeat calls to the returned function are
+   * harmless, so a tool can cancel on success, on failure and in a `finally`.
+   *
+   * Non-TTY mode cannot erase or animate anything, so it prints the notice once
+   * as a plain line and the canceller does nothing.
+   */
+  startRunning(text: string): () => void;
   /** Pin `question` at the bottom and resolve with the line the user submits. */
   ask(question: string, options?: AskOptions): Promise<string>;
   /**
@@ -101,6 +115,12 @@ interface LogItem {
 
 interface Snapshot {
   logs: LogItem[];
+  /**
+   * Tool calls currently in flight, oldest first. These live in the live region
+   * rather than in `logs`, which is what lets them be erased: `<Static>` writes
+   * each line into terminal history once and can never take it back.
+   */
+  running: LogItem[];
   /**
    * The pending question, or null when the agent holds control. This single
    * field drives BOTH halves of the bottom row: a question enables the input,
@@ -140,6 +160,7 @@ function toLabel(question: string): string {
 // because this package deliberately has no kit dependencies.
 const colored = Boolean(process.stdout.isTTY) && !process.env['NO_COLOR'];
 const userStyle = (s: string): string => (colored ? `\x1b[1m\x1b[36m${s}\x1b[39m\x1b[22m` : s);
+const dimStyle = (s: string): string => (colored ? `\x1b[2m${s}\x1b[22m` : s);
 
 const MASK = '••••••';
 
@@ -162,7 +183,13 @@ function createInkUi(options: ChatUiOptions): ChatUi {
   const initialLogs: LogItem[] = options.title ? [{ id: 0, text: options.title }] : [];
   // Starts with no question pending: the kit is booting (config, session check,
   // first balance read), which is busy time and reads as such.
-  let snapshot: Snapshot = { logs: initialLogs, question: null, balance: null, placeholder: '' };
+  let snapshot: Snapshot = {
+    logs: initialLogs,
+    running: [],
+    question: null,
+    balance: null,
+    placeholder: '',
+  };
   let nextId = 1;
   const listeners = new Set<() => void>();
 
@@ -180,6 +207,25 @@ function createInkUi(options: ChatUiOptions): ChatUi {
   const pushLog = (text: string): void => {
     snapshot = { ...snapshot, logs: [...snapshot.logs, { id: nextId++, text }] };
     emit();
+  };
+
+  // Add an in-flight line and hand back its remover. Calls are concurrent, so
+  // entries are addressed by id rather than by position: the one that finishes
+  // first is not the one that started first, and it must still take its own
+  // line away and nobody else's. `nextId` is shared with the scrollback so an
+  // id is unique across both lists.
+  const startRunning = (text: string): (() => void) => {
+    const id = nextId++;
+    snapshot = { ...snapshot, running: [...snapshot.running, { id, text }] };
+    emit();
+    return () => {
+      const remaining = snapshot.running.filter((item) => item.id !== id);
+      // Already gone: a tool that cancels on both the success and the error path
+      // (or in a `finally`) must not cost a re-render for nothing.
+      if (remaining.length === snapshot.running.length) return;
+      snapshot = { ...snapshot, running: remaining };
+      emit();
+    };
   };
 
   // One pending question at a time: the kits await ask() sequentially, so a
@@ -245,6 +291,7 @@ function createInkUi(options: ChatUiOptions): ChatUi {
   let closed = false;
   return {
     log: pushLog,
+    startRunning,
     ask,
     setStatus,
     setBalance,
@@ -283,16 +330,20 @@ function App({ store, onSubmit }: { store: Store; onSubmit: (value: string) => v
   // and the agent's first output, where a hand-toggled flag was still off.
   const busy = !pending;
 
-  // Animate the "Working" indicator between one, two and three dots so it reads
-  // as live progress rather than a frozen line. The timer only runs while the
-  // agent is busy; it resets to a single dot each time work starts.
+  // Animate the ellipsis between one, two and three dots so a wait reads as live
+  // progress rather than as a frozen line. One timer drives both the "Working"
+  // placeholder and every in-flight tool notice, so the dots move in step
+  // instead of each line ticking on its own phase. It runs only while something
+  // is actually pending, and resets to a single dot each time that starts.
+  const animating = busy || snap.running.length > 0;
   const [dotFrame, setDotFrame] = useState(0);
   useEffect(() => {
-    if (!busy) return;
+    if (!animating) return;
     setDotFrame(0);
     const timer = setInterval(() => setDotFrame((f) => (f + 1) % 3), 350);
     return () => clearInterval(timer);
-  }, [busy]);
+  }, [animating]);
+  const dots = '.'.repeat(dotFrame + 1);
 
   // The input box is ALWAYS mounted, even between prompts. Mounting/unmounting
   // it per turn made `ink-text-input`'s `useInput` toggle the terminal's raw
@@ -304,6 +355,16 @@ function App({ store, onSubmit }: { store: Store; onSubmit: (value: string) => v
   return (
     <Box flexDirection="column">
       <Static items={snap.logs}>{(item) => <Text key={item.id}>{item.text}</Text>}</Static>
+      {/* Tool calls still running, drawn in the live region so each line is
+          erased the moment its call finishes and prints its block into the
+          scrollback above. What is left behind is the block alone — never a
+          stale "(running…)" line the reader has to pair up with a later result. */}
+      {snap.running.map((item) => (
+        <Text key={item.id}>
+          {item.text}
+          <Text dimColor>{` (running${dots})`}</Text>
+        </Text>
+      ))}
       {/* Balance sits ABOVE the input box: rendering it after the input painted
           the readout beneath the prompt, colliding with the caret line. */}
       {snap.balance !== null ? (
@@ -340,6 +401,13 @@ function App({ store, onSubmit }: { store: Store; onSubmit: (value: string) => v
 function createPlainUi(): ChatUi {
   return {
     log: (line: string) => console.log(line),
+    // A pipe or a file has no cursor to move and no frame to redraw, so the
+    // notice is printed once, in the fixed form it had before the live region
+    // existed, and stays in the transcript.
+    startRunning: (text: string) => {
+      console.log(`${text} ${dimStyle('(running…)')}`);
+      return () => {};
+    },
     ask: async (question: string, options: AskOptions = {}): Promise<string> => {
       const rl = createInterface({ input: process.stdin, output: process.stdout });
       try {

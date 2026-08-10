@@ -223,6 +223,10 @@ export function toolBlock(block: ToolBlock): string {
  * With blocks printed on completion, nothing marks the start of a call, and a
  * three-minute `circle services pay` would look like a hang. This is what the
  * timer in `./tools` emits for calls slow enough to be worth announcing.
+ *
+ * The fixed form, for output that cannot be taken back: a pipe, a file, a kit
+ * with no UI. A kit with a live region gets the animated, self-erasing version
+ * instead — see `setLiveNotices` in `./tools`.
  */
 export function runningLine(name: string, detail: string): string {
   return `${name} ${detail} ${dim('(running…)')}`;

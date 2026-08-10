@@ -26,11 +26,12 @@ import {
   createBalanceReadout,
   createCommandRouter,
   reportFatal,
+  setLiveNotices,
 } from '@agent-stack-starter-kits/kit-core';
 import { onboardingWorkflow } from './workflow';
 import { buildAgent } from './agent';
 import { loadConfig } from './config';
-import { bold, heading, kitLine, red, replyBlock } from './theme';
+import { bold, heading, kitLine, red, replyBlock, toolLine } from './theme';
 
 // The chat UI pins the input to the bottom while logs scroll above it. It is
 // created in main(); the module-level handle lets the fatal handler close it
@@ -66,6 +67,10 @@ async function main(): Promise<void> {
   // Falls back to plain console + readline when stdout/stdin is not a TTY.
   const chat = createChatUi({ title: heading('Autonomous Payment Agent') });
   ui = chat;
+  // In-flight tool calls draw in the live region at the bottom of the frame
+  // rather than in the scrollback, so each one erases itself the moment its
+  // finished block prints (see kit-core's `setLiveNotices`).
+  setLiveNotices((label) => chat.startRunning(toolLine(label)));
 
   log('Autonomous Payment Agent demo starting');
   const config = loadConfig();

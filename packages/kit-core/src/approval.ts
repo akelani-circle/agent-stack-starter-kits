@@ -37,6 +37,8 @@
  * to be run by a human.
  */
 
+import { isKitLoggedIn } from './session';
+
 /** Matched anywhere in a segment, so a pipe or a `$(…)` cannot slip one through. */
 const NEEDS_APPROVAL: readonly RegExp[] = [
   // Buying from a seller. x402 charges before the request resolves, so this is
@@ -61,24 +63,13 @@ const NEEDS_APPROVAL: readonly RegExp[] = [
 ];
 
 /**
- * Whether a Circle session is believed to be live right now.
- *
- * Starts true because every kit runs its own login gate before the agent takes
- * its first turn, so by the time any approval prompt can appear there is a
- * session. It exists because the login label used to assert "this kit already
- * logged you in" unconditionally — including on the turn straight after the
- * agent ran `circle wallet logout`, where it is false and talks the user out of
- * approving the one command that would fix it.
+ * The login label is the reason the session flag in `./session` exists: it used
+ * to assert "this kit already logged you in" unconditionally — including on the
+ * turn straight after the agent ran `circle wallet logout`, where it is false
+ * and talks the user out of approving the one command that would fix it.
  */
-let kitLoggedIn = true;
-
-/** Record whether a session is live. Called by the shell when it sees a login or logout land. */
-export function setKitLoggedIn(value: boolean): void {
-  kitLoggedIn = value;
-}
-
 const LOGIN_LABEL = (): string =>
-  kitLoggedIn
+  isKitLoggedIn()
     ? 'log in — this kit already logged you in, and the CLI prompt cannot be answered from here'
     : 'log in — you are logged out; the CLI prompt cannot be answered from here, so this has to ' +
       'use --init and an OTP you read back from your email';

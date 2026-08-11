@@ -48,9 +48,9 @@ import {
   isHelpInvocation,
   requiresApproval,
   segmentsOf,
-  setKitLoggedIn,
 } from './approval';
 import { recordServiceSearch } from './commands';
+import { setKitLoggedIn } from './session';
 import { formatShellResult, runShell } from './shell';
 import { bold, dim, green, red, runningLine, toolBlock, yellow, type ToolBlock } from './theme';
 

@@ -13,6 +13,7 @@
     "./commands": "./src/commands.ts",
     "./fatal": "./src/fatal.ts",
     "./instructions": "./src/instructions.ts",
+    "./session": "./src/session.ts",
     "./shell": "./src/shell.ts",
     "./skills": "./src/skills.ts",
     "./theme": "./src/theme.ts",

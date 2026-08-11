@@ -68,6 +68,19 @@ export interface AskOptions {
   placeholder?: string;
 }
 
+/**
+ * The line pinned above the input.
+ *
+ * Two tones, because the slot has two jobs. A `balance` is the readout itself,
+ * in green under its label. A `notice` stands in for a readout that cannot be
+ * shown and says why, in red — an empty slot where a balance used to be reads
+ * as a glitch, and leaves the user with nothing to act on.
+ */
+export interface WalletLine {
+  text: string;
+  tone: 'balance' | 'notice';
+}
+
 /** Imperative handle the kits drive; identical shape in TTY and non-TTY modes. */
 export interface ChatUi {
   /** Append one line to the scrollback log (keeps any embedded ANSI color). */
@@ -97,8 +110,8 @@ export interface ChatUi {
    * drift apart — the indicator would stop while the input stayed disabled.
    */
   setStatus(text: string | null): void;
-  /** Show (or clear, with null) a persistent balance line pinned above the input. */
-  setBalance(text: string | null): void;
+  /** Show (or clear, with null) the persistent wallet line pinned above the input. */
+  setBalance(line: WalletLine | null): void;
   /** Unmount the UI and restore the patched console methods. */
   close(): void;
 }
@@ -128,7 +141,7 @@ interface Snapshot {
    * one state, so they cannot contradict each other.
    */
   question: string | null;
-  balance: string | null;
+  balance: WalletLine | null;
   /** Idle-input hint from the current `ask()`'s `placeholder` option, or ''. */
   placeholder: string;
 }
@@ -264,8 +277,8 @@ function createInkUi(options: ChatUiOptions): ChatUi {
   // No-op: the indicator follows the input state (see ChatUi.setStatus).
   const setStatus = (): void => {};
 
-  const setBalance = (text: string | null): void => {
-    snapshot = { ...snapshot, balance: text };
+  const setBalance = (line: WalletLine | null): void => {
+    snapshot = { ...snapshot, balance: line };
     emit();
   };
 
@@ -367,13 +380,20 @@ function App({ store, onSubmit }: { store: Store; onSubmit: (value: string) => v
       ))}
       {/* Balance sits ABOVE the input box: rendering it after the input painted
           the readout beneath the prompt, colliding with the caret line. */}
-      {snap.balance !== null ? (
+      {snap.balance === null ? null : snap.balance.tone === 'balance' ? (
         <Text color="green">
           {'◈ '}
           <Text bold>Wallet Balance:</Text>
-          {` ${snap.balance}`}
+          {` ${snap.balance.text}`}
         </Text>
-      ) : null}
+      ) : (
+        // No "Wallet Balance:" label on a notice: the label promises a figure,
+        // and the whole point of this line is that there isn't one.
+        <Text color="red">
+          {'◈ '}
+          {snap.balance.text}
+        </Text>
+      )}
       <Box flexDirection="column" marginTop={1}>
         {label ? <Text>{label}</Text> : null}
         <Box borderStyle="round" paddingX={1} borderColor={pending ? undefined : 'gray'}>

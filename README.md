@@ -56,10 +56,12 @@ Each kit is deliberately thin: a `config.ts`, an `agent.ts` wiring its framework
 
 ## Prerequisites
 
-- Node.js 20+
+- Node.js 22.15+
 - [Bun](https://bun.com) 1.2+ (workspace manager)
 - Circle CLI: `bun add -g @circle-fin/cli`
 - A Circle account, and an API key for whichever model provider the kit uses
+
+On a corporate network that inspects TLS traffic, see the corporate-network block at the bottom of any kit's `.env.example`: one setting there is usually the difference between the agent working and every `circle` command reporting `fetch failed`.
 
 Circle's skills are **not** a prerequisite — the agent installs them on its first run. If you would rather do it yourself, or already have them for your editor, either of these works and both are idempotent:
 

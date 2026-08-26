@@ -139,8 +139,10 @@ const INHERITED_ENV_VARS = [
  * arbitrary code into every Node process the agent starts, which is a far
  * bigger grant than anything else on this list. But a corporate CA that lives
  * in the operating system's trust store — rather than in a file — is invisible
- * to Node unless `--use-system-ca` is set, and that is normally set here. So
- * the variable is filtered rather than dropped.
+ * to Node unless `--use-system-ca` is set, and a user on such a network is told
+ * to set it (see any kit's `.env.example`). So the variable is filtered rather
+ * than dropped: nothing here turns the flag on, it only survives when the user
+ * has turned it on themselves.
  */
 const SAFE_NODE_OPTIONS = new Set(['--use-system-ca', '--use-openssl-ca']);
 
@@ -284,8 +286,9 @@ const OPAQUE_NETWORK_FAILURE = /\bfetch failed\b/i;
 const NETWORK_HINT =
   '[This is a network failure, not a bad command: nothing reached the server, so re-running it ' +
   'with different flags will fail the same way. On a machine that needs a proxy or a private ' +
-  'root CA, check that HTTPS_PROXY and NODE_EXTRA_CA_CERTS are set in the environment this ' +
-  'process was started from. Report it to the user rather than retrying.]';
+  'root CA, check that HTTPS_PROXY is set and NODE_OPTIONS=--use-system-ca is on in the ' +
+  "environment this process was started from, as the kit's .env.example describes. Report it " +
+  'to the user rather than retrying.]';
 
 /**
  * Render a result as the model reads it.

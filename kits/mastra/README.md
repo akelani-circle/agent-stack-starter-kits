@@ -67,6 +67,7 @@ A few common lookups skip the model round-trip and call the `circle` CLI directl
 | `ANTHROPIC_API_KEY` *or* `OPENAI_API_KEY` | one of | Anthropic is used when both are set. |
 | `LLM_MODEL` | no | Overrides the default model (`anthropic/claude-opus-5` / `openai/gpt-5.6-sol`). Mastra resolves a model from one `provider/model` string, so include the prefix. |
 | `NO_COLOR` | no | Disables colored output. Color is off automatically when output is piped. |
+| `NODE_OPTIONS` | no | Set to `--use-system-ca` if your corporate network inspects TLS traffic, so the `circle` CLI trusts your organisation's certificate authority. |
 
 There is no chain to configure. The `circle` CLI settles each payment on a chain the seller and your wallet have in common, and the agent reads Circle's skills for how to choose between them.
 

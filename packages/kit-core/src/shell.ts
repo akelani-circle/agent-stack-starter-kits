@@ -79,11 +79,24 @@ export interface ShellResult {
  * session on Linux and the profile paths on Windows — without them every command
  * reports a logged-out wallet on a host that is logged in.
  *
+ * The proxy and certificate names are here for the same reason as the keyring
+ * ones, and were the more expensive omission. A managed laptop commonly reaches
+ * the internet only through a proxy, or only by trusting a private root CA, and
+ * both of those are configured in the environment. Without them the CLI cannot
+ * open a connection from the agent's shell while the identical command works in
+ * the user's own terminal — and undici reports that as a bare `fetch failed`
+ * with the cause swallowed, so nothing on screen points at the environment.
+ * Note that a full-tunnel VPN needs none of this: routing and DNS are system
+ * state, inherited by any child no matter how short this list is.
+ *
  * What is *not* forwarded matters as much. The kit's own `.env` holds an LLM
  * provider key, and the agent has no use for it: passing the whole environment
  * would put that key one `env` command away from any output the model reads
  * back. CIRCLE_ACCEPT_TERMS is absent for a different reason — accepting
  * Circle's Terms of Use is not something an agent may do for a user.
+ * NODE_TLS_REJECT_UNAUTHORIZED is absent for a third: forwarding it would let a
+ * stray export in a shell profile silently turn off certificate verification
+ * for every paid call the agent makes.
  */
 const INHERITED_ENV_VARS = [
   'PATH',
@@ -100,7 +113,45 @@ const INHERITED_ENV_VARS = [
   'LOCALAPPDATA',
   'SYSTEMROOT',
   'COMSPEC',
+  // Reaching the network at all. Both cases are listed: the tools that read
+  // these disagree about which one wins, so forwarding only one of a pair would
+  // change behaviour rather than preserve it.
+  'HTTP_PROXY',
+  'HTTPS_PROXY',
+  'ALL_PROXY',
+  'NO_PROXY',
+  'http_proxy',
+  'https_proxy',
+  'all_proxy',
+  'no_proxy',
+  'NODE_USE_ENV_PROXY',
+  // Trusting the certificate the proxy presents.
+  'NODE_EXTRA_CA_CERTS',
+  'SSL_CERT_FILE',
+  'SSL_CERT_DIR',
+  'REQUESTS_CA_BUNDLE',
 ];
+
+/**
+ * The NODE_OPTIONS flags that are safe to pass on, and only those.
+ *
+ * The variable as a whole is not forwarded: `--require` and `--import` load
+ * arbitrary code into every Node process the agent starts, which is a far
+ * bigger grant than anything else on this list. But a corporate CA that lives
+ * in the operating system's trust store — rather than in a file — is invisible
+ * to Node unless `--use-system-ca` is set, and a user on such a network is told
+ * to set it (see any kit's `.env.example`). So the variable is filtered rather
+ * than dropped: nothing here turns the flag on, it only survives when the user
+ * has turned it on themselves.
+ */
+const SAFE_NODE_OPTIONS = new Set(['--use-system-ca', '--use-openssl-ca']);
+
+function filteredNodeOptions(): string | undefined {
+  const kept = (process.env.NODE_OPTIONS ?? '')
+    .split(/\s+/)
+    .filter((flag) => SAFE_NODE_OPTIONS.has(flag));
+  return kept.length > 0 ? kept.join(' ') : undefined;
+}
 
 function childEnv(): NodeJS.ProcessEnv {
   const env: NodeJS.ProcessEnv = {
@@ -113,6 +164,8 @@ function childEnv(): NodeJS.ProcessEnv {
     const value = process.env[name];
     if (value !== undefined) env[name] = value;
   }
+  const nodeOptions = filteredNodeOptions();
+  if (nodeOptions) env.NODE_OPTIONS = nodeOptions;
   return env;
 }
 
@@ -222,6 +275,22 @@ export function runShell(command: string, options: ShellOptions = {}): Promise<S
 }
 
 /**
+ * `fetch failed` is what Node prints when a connection could not be opened and
+ * the caller reported only the message, dropping the `cause` that says why. It
+ * is the least informative network error there is, and on its own it reads like
+ * the command was wrong rather than the environment — which is exactly how it
+ * gets retried with different flags until the user gives up.
+ */
+const OPAQUE_NETWORK_FAILURE = /\bfetch failed\b/i;
+
+const NETWORK_HINT =
+  '[This is a network failure, not a bad command: nothing reached the server, so re-running it ' +
+  'with different flags will fail the same way. On a machine that needs a proxy or a private ' +
+  'root CA, check that HTTPS_PROXY is set and NODE_OPTIONS=--use-system-ca is on in the ' +
+  "environment this process was started from, as the kit's .env.example describes. Report it " +
+  'to the user rather than retrying.]';
+
+/**
  * Render a result as the model reads it.
  *
  * Exit status is always stated, including on success, because "it printed
@@ -241,6 +310,9 @@ export function formatShellResult(result: ShellResult): string {
     );
   }
   parts.push(body || '(no output)');
+  if (result.exitCode !== 0 && OPAQUE_NETWORK_FAILURE.test(body)) {
+    parts.push(NETWORK_HINT);
+  }
   if (result.truncated) {
     parts.push(
       `[output cut here — ${result.omitted} more characters. Do not re-run this command to see ` +

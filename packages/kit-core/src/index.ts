@@ -21,6 +21,7 @@ export * from './balance';
 export * from './commands';
 export * from './fatal';
 export * from './instructions';
+export * from './session';
 export * from './shell';
 export * from './skills';
 export * from './theme';

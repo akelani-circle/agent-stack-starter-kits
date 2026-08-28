@@ -121,6 +121,118 @@ export function toolLine(line: string): string {
 }
 
 /**
+ * Bounds on what a tool block *shows*.
+ *
+ * Deliberately unrelated to `MAX_SHELL_OUTPUT_CHARS` in `./shell`, which bounds
+ * what the *model* reads (30k). A transcript a person is watching wants far
+ * less: one `circle services search` at the model's budget would bury the rest
+ * of the run. What is cut here is still in the tool result the agent got.
+ */
+export const TOOL_BLOCK_MAX_LINES = 12;
+export const TOOL_BLOCK_MAX_CHARS = 1_500;
+export const TOOL_BLOCK_MAX_LINE_CHARS = 200;
+
+/** One finished tool call, as the transcript shows it. */
+export interface ToolBlock {
+  /** Tool name, e.g. `shell`. */
+  name: string;
+  /** What it was called on: the command, the path, the pattern. */
+  detail?: string;
+  /** What it printed. Omit for tools whose output is not worth showing. */
+  body?: string;
+  /** How it ended, e.g. `exit 0`, `252 lines`, an error message. */
+  status: string;
+  /** False paints the status red. Defaults to true. */
+  ok?: boolean;
+  /** Footer facts after the status, e.g. `1.8s`, `952 chars`. */
+  meta?: string[];
+}
+
+/** Cut one line to width without collapsing its indentation, unlike `preview`. */
+function cutLine(line: string): string {
+  return line.length > TOOL_BLOCK_MAX_LINE_CHARS
+    ? `${line.slice(0, TOOL_BLOCK_MAX_LINE_CHARS)}…`
+    : line;
+}
+
+/** The body lines a block shows, and how many it dropped. */
+function bodyLines(body: string): { shown: string[]; hidden: number } {
+  const text = body.trimEnd();
+  if (!text) return { shown: [], hidden: 0 };
+
+  // JSON is what most of these commands print, and it is unreadable as one long
+  // line, so it is re-indented and highlighted before being measured.
+  let rendered = text;
+  try {
+    JSON.parse(text);
+    rendered = colorizeJson(text);
+  } catch {
+    // not JSON; show it as it came
+  }
+
+  const lines = rendered.split('\n');
+  const shown: string[] = [];
+  let chars = 0;
+  for (const line of lines) {
+    if (shown.length >= TOOL_BLOCK_MAX_LINES || chars >= TOOL_BLOCK_MAX_CHARS) break;
+    const cut = cutLine(line);
+    shown.push(cut);
+    chars += cut.length + 1;
+  }
+  return { shown, hidden: lines.length - shown.length };
+}
+
+/**
+ * Render a finished tool call as one block: header, output, status footer.
+ *
+ * ```
+ * [tool] shell circle wallet balance --address 0xc3f4… --chain BASE
+ * │ { "balance": "12.40", "token": "USDC" }
+ * └ exit 0 · 1.8s · 39 chars
+ * ```
+ *
+ * It is one string on purpose. Agents call tools in parallel, so a command line
+ * printed when a call starts and a result line printed when it ends have every
+ * other in-flight call landing between them — which is how a transcript ends up
+ * with five commands followed by five exit codes and no way to pair them. A
+ * block is emitted once, complete, and cannot be split; concurrency then only
+ * decides the order blocks arrive in, which is the order they finished.
+ */
+export function toolBlock(block: ToolBlock): string {
+  const head = toolLine(`${block.name}${block.detail ? ` ${block.detail}` : ''}`);
+  const gutter = dim('│');
+  const lines = [head];
+
+  if (block.body) {
+    const { shown, hidden } = bodyLines(block.body);
+    for (const line of shown) lines.push(`${gutter} ${line}`);
+    if (hidden > 0) {
+      lines.push(`${gutter} ${dim(`… ${hidden} more line${hidden === 1 ? '' : 's'}`)}`);
+    }
+  }
+
+  const status = block.ok === false ? red(block.status) : green(block.status);
+  const meta = block.meta?.length ? dim(` · ${block.meta.join(' · ')}`) : '';
+  lines.push(`${dim('└')} ${status}${meta}`);
+  return lines.join('\n');
+}
+
+/**
+ * The line a tool call prints when it is *still running*.
+ *
+ * With blocks printed on completion, nothing marks the start of a call, and a
+ * three-minute `circle services pay` would look like a hang. This is what the
+ * timer in `./tools` emits for calls slow enough to be worth announcing.
+ *
+ * The fixed form, for output that cannot be taken back: a pipe, a file, a kit
+ * with no UI. A kit with a live region gets the animated, self-erasing version
+ * instead — see `setLiveNotices` in `./tools`.
+ */
+export function runningLine(name: string, detail: string): string {
+  return `${name} ${detail} ${dim('(running…)')}`;
+}
+
+/**
  * Build the `[<label>-kit]` framework-line colorizer for one kit. Each kit calls
  * this once with its own label; the formatting is identical everywhere else, so
  * only the tag differs between kits.

@@ -6,7 +6,7 @@
   "type": "module",
   "engines": {
     "bun": ">=1.2",
-    "node": ">=20"
+    "node": ">=22.15.0"
   },
   "scripts": {
     "demo": "bun run src/index.ts",

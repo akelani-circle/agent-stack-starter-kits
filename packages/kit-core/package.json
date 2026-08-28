@@ -13,6 +13,7 @@
     "./commands": "./src/commands.ts",
     "./fatal": "./src/fatal.ts",
     "./instructions": "./src/instructions.ts",
+    "./session": "./src/session.ts",
     "./shell": "./src/shell.ts",
     "./skills": "./src/skills.ts",
     "./theme": "./src/theme.ts",
@@ -20,7 +21,7 @@
   },
   "engines": {
     "bun": ">=1.2",
-    "node": ">=20"
+    "node": ">=22.15.0"
   },
   "scripts": {
     "typecheck": "tsc --noEmit",

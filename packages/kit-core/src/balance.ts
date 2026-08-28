@@ -30,13 +30,46 @@
  *     before the first prompt.
  *   - `refreshSoon()` — fire-and-forget, for the end of a turn, so the prompt
  *     comes back immediately and the readout catches up a moment later.
+ *
+ * The readout is also the one place that decides what a logged-out session
+ * shows: a figure and an address left pinned above the input after a logout name
+ * an account the user is no longer in, so the line is replaced by a notice that
+ * says so and says how to get the readout back.
  */
-import { formatUsdcBalance, walletUsdcBalance } from '@agent-stack-starter-kits/circle-tools';
+import {
+  formatUsdcBalance,
+  sessionStatus,
+  walletUsdcBalance,
+} from '@agent-stack-starter-kits/circle-tools';
+
+import { isKitLoggedIn, setKitLoggedIn } from './session';
+
+/**
+ * The pinned line, mirroring `agent-cli`'s `WalletLine` structurally rather than
+ * importing it: this package stays headless (no Ink, no React), so the chat UI
+ * satisfies this by shape.
+ */
+export interface BalanceLine {
+  text: string;
+  tone: 'balance' | 'notice';
+}
 
 /** The slice of the chat UI a readout needs; kits pass their `ChatUi`. */
 export interface BalanceTarget {
-  setBalance(text: string | null): void;
+  setBalance(line: BalanceLine | null): void;
 }
+
+/**
+ * What the line says once the session is gone.
+ *
+ * It names the fix, because the kit has no `/login` command to point at: the
+ * startup gate is behind us, so logging back in mid-session means asking the
+ * agent, which runs the two-step `--init` login and reads the OTP back.
+ */
+const LOGGED_OUT_NOTICE: BalanceLine = {
+  text: 'You are logged out — ask the agent to log you in to see your balance here.',
+  tone: 'notice',
+};
 
 export interface BalanceReadout {
   /** Update the readout and resolve once it is current. */
@@ -62,15 +95,47 @@ export function createBalanceReadout(
   let inFlight: Promise<void> | null = null;
   let repeat = false;
 
+  /**
+   * Ask the CLI whether a session is live, and record the answer so the rest of
+   * the kit (the approval prompt's login label) agrees with the readout.
+   *
+   * One `wallet status` spawn, and only on the two paths that already cost more
+   * than that or are about to show something wrong. When the check itself fails
+   * there is nothing better to go on than what we already believed, so it says
+   * so — which keeps a network blip from blanking a good readout.
+   */
+  const sessionLive = async (): Promise<boolean> => {
+    try {
+      const { loggedIn } = await sessionStatus();
+      setKitLoggedIn(loggedIn);
+      return loggedIn;
+    } catch {
+      return isKitLoggedIn();
+    }
+  };
+
   // Best-effort by contract: a balance read must never break the session (no
-  // wallet yet, an RPC blip, a logged-out session), so a failure leaves the last
-  // shown value in place rather than propagating or blanking the line.
+  // wallet yet, an RPC blip), so a failure leaves the last shown value in place
+  // rather than propagating. The exception is a session that has gone: there the
+  // last shown value is exactly what must not stay on screen.
   const update = async (): Promise<void> => {
+    // The in-process flag only sees logins and logouts the agent typed, so a
+    // `false` is confirmed rather than trusted — that also picks up a login done
+    // in another terminal, and costs one status call in place of a balance read.
+    if (!isKitLoggedIn() && !(await sessionLive())) {
+      target()?.setBalance(LOGGED_OUT_NOTICE);
+      return;
+    }
     try {
       const summary = await walletUsdcBalance();
-      target()?.setBalance(summary ? formatUsdcBalance(summary) : null);
+      // Null, not a notice, when there is simply no wallet yet: that is a
+      // first-run state the agent is about to fix, not something to warn about.
+      target()?.setBalance(summary ? { text: formatUsdcBalance(summary), tone: 'balance' } : null);
     } catch {
-      // Leave the last shown balance in place.
+      // A read fails for reasons that mostly have nothing to do with the session
+      // — so ask, and replace the line only when the session really is gone (an
+      // expiry, or a logout done outside this process).
+      if (!(await sessionLive())) target()?.setBalance(LOGGED_OUT_NOTICE);
     }
   };
 

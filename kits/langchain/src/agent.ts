@@ -23,10 +23,10 @@ import { MemorySaver } from '@langchain/langgraph';
 import { ChatOpenAI } from '@langchain/openai';
 import { createDeepAgent, FilesystemBackend } from 'deepagents';
 import { createMiddleware } from 'langchain';
-import { preview } from '@agent-stack-starter-kits/kit-core';
+import { announceRunning, preview } from '@agent-stack-starter-kits/kit-core';
 
 import type { KitConfig } from './config';
-import { kitLine, toolLine, yellow } from './theme';
+import { kitLine, toolBlock, toolLine, yellow } from './theme';
 import { buildTools, type AskFn } from './tools';
 
 const MAX_RETRIES = 4;
@@ -115,22 +115,62 @@ function describeArgs(args: Record<string, unknown>): string {
     .join(' ');
 }
 
+/** The built-ins whose output is worth showing; a file read opens a file the user already has. */
+const BODY_TOOLS = new Set(['ls', 'glob', 'grep']);
+
+/** Pull the text out of whatever a tool handler returned, defensively. */
+function resultText(result: unknown): string {
+  const content = (result as { content?: unknown } | null | undefined)?.content;
+  if (typeof content === 'string') return content;
+  if (!Array.isArray(content)) return '';
+  return content
+    .map((part: unknown) =>
+      typeof part === 'string' ? part : String((part as { text?: string }).text ?? ''),
+    )
+    .join('\n');
+}
+
 /**
- * Announce each built-in file tool call in the scrollback.
+ * Print each built-in file tool call in the scrollback, as one finished block.
  *
- * `kit-core`'s tools log themselves, so the shell needs nothing here; Deep
+ * `kit-core`'s tools print themselves, so the shell needs nothing here; Deep
  * Agents' built-ins do not, and a turn that silently reads four skill documents
- * looks like a freeze. This is the one thing the middleware does — it always
- * calls the handler and never touches the result.
+ * looks like a freeze. The middleware still never touches the result — it awaits
+ * it, prints it, and hands it back exactly as it came.
  */
 const fileToolLogging = createMiddleware({
   name: 'FileToolLogging',
-  wrapToolCall: (request, handler) => {
+  wrapToolCall: async (request, handler) => {
     const { name, args } = request.toolCall;
-    if (FILE_TOOL_NAMES.has(name)) {
-      console.log(toolLine(`${name} ${preview(describeArgs(args))}`));
+    if (!FILE_TOOL_NAMES.has(name)) return handler(request);
+
+    const detail = preview(describeArgs(args));
+    const emit = (line: string): void => console.log(toolLine(line));
+    const stopNotice = announceRunning(emit, name, detail);
+    const startedAt = Date.now();
+
+    let result;
+    try {
+      result = await handler(request);
+    } catch (e) {
+      stopNotice();
+      console.log(toolBlock({ name, detail, status: (e as Error).message, ok: false }));
+      throw e;
     }
-    return handler(request);
+    stopNotice();
+
+    const text = resultText(result);
+    const showBody = BODY_TOOLS.has(name);
+    console.log(
+      toolBlock({
+        name,
+        detail,
+        body: showBody ? text : undefined,
+        status: showBody ? 'ok' : `${text ? text.split('\n').length : 0} lines`,
+        meta: [`${((Date.now() - startedAt) / 1000).toFixed(1)}s`, `${text.length} chars`],
+      }),
+    );
+    return result;
   },
 });
 

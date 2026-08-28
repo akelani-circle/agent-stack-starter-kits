@@ -11,12 +11,11 @@ An agent built with [Mastra](https://mastra.ai) that owns a USDC wallet and pays
 ## Run
 
 ```bash
+cd kits/mastra
 bun install
-cp kits/mastra/.env.example kits/mastra/.env   # add your API key
-bun run --cwd kits/mastra demo
+cp .env.example .env   # add your API key
+bun run demo
 ```
-
-Use `--cwd`, not `bun --filter`: the filter dashboard elides output and interferes with the approval prompt.
 
 ## How it works
 

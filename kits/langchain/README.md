@@ -11,12 +11,11 @@ An agent built with [LangChain Deep Agents](https://docs.langchain.com/oss/javas
 ## Run
 
 ```bash
+cd kits/langchain
 bun install
-cp kits/langchain/.env.example kits/langchain/.env   # add your API key
-bun run --cwd kits/langchain demo
+cp .env.example .env   # add your API key
+bun run demo
 ```
-
-Use `--cwd`, not `bun --filter`: the filter dashboard elides output and interferes with the approval prompt.
 
 ## How it works
 

@@ -11,12 +11,11 @@ An agent built with the [Vercel AI SDK](https://sdk.vercel.ai) that owns a USDC 
 ## Run
 
 ```bash
+cd kits/vercel-ai
 bun install
-cp kits/vercel-ai/.env.example kits/vercel-ai/.env   # add your API key
-bun run --cwd kits/vercel-ai demo
+cp .env.example .env   # add your API key
+bun run demo
 ```
-
-Use `--cwd`, not `bun --filter`: the filter dashboard elides output and interferes with the approval prompt.
 
 ## How it works
 

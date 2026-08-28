@@ -11,12 +11,11 @@ An agent built with the [Google Agent Development Kit](https://adk.dev/get-start
 ## Run
 
 ```bash
+cd kits/google-adk
 bun install
-cp kits/google-adk/.env.example kits/google-adk/.env   # add your API key
-bun run --cwd kits/google-adk demo
+cp .env.example .env   # add your API key
+bun run demo
 ```
-
-Use `--cwd`, not `bun --filter`: the filter dashboard elides output and interferes with the approval prompt.
 
 ## How it works
 

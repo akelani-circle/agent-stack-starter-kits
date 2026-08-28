@@ -11,12 +11,11 @@ An agent built with the [OpenAI Agents SDK](https://openai.github.io/openai-agen
 ## Run
 
 ```bash
+cd kits/openai-agents
 bun install
-cp kits/openai-agents/.env.example kits/openai-agents/.env   # add your API key
-bun run --cwd kits/openai-agents demo
+cp .env.example .env   # add your API key
+bun run demo
 ```
-
-Use `--cwd`, not `bun --filter`: the filter dashboard elides output and interferes with the approval prompt.
 
 ## How it works
 

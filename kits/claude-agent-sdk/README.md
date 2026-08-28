@@ -11,12 +11,11 @@ An agent built with the [Claude Agent SDK](https://code.claude.com/docs/en/agent
 ## Run
 
 ```bash
+cd kits/claude-agent-sdk
 bun install
-cp kits/claude-agent-sdk/.env.example kits/claude-agent-sdk/.env   # add your API key
-bun run --cwd kits/claude-agent-sdk demo
+cp .env.example .env   # add your API key
+bun run demo
 ```
-
-Use `--cwd`, not `bun --filter`: the filter dashboard elides output and interferes with the approval prompt.
 
 ## How it works
 
